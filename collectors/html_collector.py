@@ -1,13 +1,139 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 import re
 import json
 import time
-import xml.etree.ElementTree as ET
 from collectors.base_collector import BaseCollector
+
+
+# ---------------------------------------------------------------------------
+# HELPER 1 — Tentativi multipli con user-agent (elimina duplicazione)
+# ---------------------------------------------------------------------------
+USER_AGENTS = [
+    {
+        'name': 'standard',
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+    },
+    {
+        'name': 'googlebot',
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+        }
+    },
+    {
+        'name': 'browser',
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+        }
+    }
+]
+
+
+def retry_with_user_agents(
+    url: str,
+    session: requests.Session,
+    timeout: int = 15,
+    logger: Optional[Any] = None
+) -> Tuple[bool, Optional[str]]:
+    """Tenta di scaricare una URL con multiple user-agent.
+    
+    Returns:
+        (success, content) - content è None se tutti i tentativi falliscono
+    """
+    for ua_config in USER_AGENTS:
+        try:
+            if logger:
+                logger.debug(f"    📥 Download ({ua_config['name']}): {url}")
+            
+            response = session.get(url, headers=ua_config['headers'], timeout=timeout)
+            
+            if response.status_code == 200:
+                return True, response.text
+            else:
+                if logger:
+                    logger.debug(f"    ⚠️  Status code: {response.status_code}")
+        except Exception as e:
+            if logger:
+                logger.warning(f"    ⚠️  Errore {ua_config['name']}: {e}")
+    
+    return False, None
+
+
+# ---------------------------------------------------------------------------
+# HELPER 2 — Pattern di skip per immagini (centralizza filtraggio)
+# ---------------------------------------------------------------------------
+IMAGE_SKIP_PATTERNS = [
+    # Data URI (SVG inline, base64)
+    r'^data:',
+    # Tracking pixel
+    r'linkedin\.com/collect',
+    r'facebook\.com/tr',
+    r'google-analytics\.com',
+    r'googletagmanager\.com',
+    r'px\.ads\.linkedin\.com',
+    r'connect\.facebook\.net',
+    r'analytics\.google\.com',
+    # Gravatar (avatar WordPress)
+    r'secure\.gravatar\.com',
+    r'www\.gravatar\.com',
+    # URL con typo evidenti
+    r'^https?://0[a-z]',
+    # Pixel di monitoraggio comuni
+    r'pixel\.',
+    r'tracking\.',
+    r'beacon\.',
+    # Placeholder images
+    r'placeholder\.',
+    r'dummyimage\.com',
+    r'via\.placeholder',
+]
+
+
+def should_skip_image(url: str) -> bool:
+    """Verifica se un'immagine deve essere skippata."""
+    return any(re.search(p, url, re.IGNORECASE) for p in IMAGE_SKIP_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# HELPER 3 — Analisi elementi HTML con validazione
+# ---------------------------------------------------------------------------
+def analyze_html_element(
+    element: Any,
+    checks: List[Tuple[str, Callable[[Any], bool], str]],
+    url: str,
+    element_type: str
+) -> List[Dict[str, Any]]:
+    """Analizza un elemento HTML con multiple check.
+    
+    Args:
+        element: Elemento BeautifulSoup da analizzare
+        checks: Lista di (check_name, check_function, error_message)
+        url: URL della pagina
+        element_type: Tipo elemento (title, description, etc.)
+    
+    Returns:
+        Lista di problemi trovati
+    """
+    problems = []
+    
+    for check_name, check_fn, error_msg in checks:
+        if not check_fn(element):
+            problems.append({
+                'url': url,
+                'element_type': element_type,
+                'problem': error_msg
+            })
+    
+    return problems
+
 
 class HTMLCollector(BaseCollector):
     """Crawler HTML avanzato con analisi multi-pagina per drill-down."""
@@ -34,9 +160,9 @@ class HTMLCollector(BaseCollector):
         self.playwright_p = None
     
     def is_available(self) -> bool:
-        """Il crawler HTML è sempre disponibile (non richiede credenziali)."""
+        """Il crawler HTML è sempre disponibile."""
         return True
-
+    
     def _check_playwright(self) -> bool:
         try:
             import playwright
@@ -110,28 +236,24 @@ class HTMLCollector(BaseCollector):
             self.logger.info(f"  📋 Raccolta URL per drill-down...")
             all_urls = self._collect_urls_from_sitemap(domain, homepage_data, results['robots'])
             
-            # DEBUG: Log dettagliato
-            self.logger.info(f"  📊 URL totali trovate: {len(all_urls)}")
-            if len(all_urls) > 0:
-                self.logger.info(f"  📝 Prime 5 URL: {all_urls[:5]}")
+            self.logger.debug(f"  📊 URL totali trovate: {len(all_urls)}")
             
             # Limita al massimo configurato
             urls_to_crawl = all_urls[:self.max_pages]
             self.logger.info(f"  🎯 URL da analizzare (limite {self.max_pages}): {len(urls_to_crawl)}")
             
             # 5. Crawling profondo di tutte le pagine per drill-down
-            if len(urls_to_crawl) > 0:
+            if urls_to_crawl:
                 self.logger.info(f"  🔍 Avvio crawling drill-down...")
                 drilldown_data = self._crawl_pages_for_drilldown(urls_to_crawl)
                 results['drilldown'] = drilldown_data
                 
-                # DEBUG: Log risultati drill-down
-                self.logger.info(f"  ✅ Drill-down completato:")
-                self.logger.info(f"    - Pagine analizzate: {len(drilldown_data.get('pages_analyzed', []))}")
-                self.logger.info(f"    - Problemi immagini: {len(drilldown_data.get('images_problems', []))}")
-                self.logger.info(f"    - Problemi title: {len(drilldown_data.get('title_problems', []))}")
-                self.logger.info(f"    - Problemi description: {len(drilldown_data.get('description_problems', []))}")
-                self.logger.info(f"    - Problemi headings: {len(drilldown_data.get('headings_problems', []))}")
+                self.logger.debug(f"  ✅ Drill-down completato:")
+                self.logger.debug(f"    - Pagine analizzate: {len(drilldown_data.get('pages_analyzed', []))}")
+                self.logger.debug(f"    - Problemi immagini: {len(drilldown_data.get('images_problems', []))}")
+                self.logger.debug(f"    - Problemi title: {len(drilldown_data.get('title_problems', []))}")
+                self.logger.debug(f"    - Problemi description: {len(drilldown_data.get('description_problems', []))}")
+                self.logger.debug(f"    - Problemi headings: {len(drilldown_data.get('headings_problems', []))}")
             else:
                 self.logger.warning(f"  ⚠️  Nessuna URL trovata per drill-down!")
                 results['drilldown'] = {
@@ -400,12 +522,6 @@ class HTMLCollector(BaseCollector):
             if href and href not in css_files:
                 css_files.append(urljoin(base_url, href))
         
-        # Metodo 3: tag <style> con src (raro ma possibile)
-        for style in soup.find_all('style', src=True):
-            src = style.get('src')
-            if src and src not in css_files:
-                css_files.append(urljoin(base_url, src))
-        
         return css_files
     
     def _get_js_files(self, soup, base_url):
@@ -418,25 +534,12 @@ class HTMLCollector(BaseCollector):
             if src:
                 js_files.append(urljoin(base_url, src))
         
-        # Metodo 2: tag <script type="text/javascript"> con src
-        for script in soup.find_all('script', type='text/javascript'):
-            src = script.get('src')
-            if src and src not in js_files:
-                js_files.append(urljoin(base_url, src))
-        
-        # Metodo 3: tag <script type="module"> con src
-        for script in soup.find_all('script', type='module'):
-            src = script.get('src')
-            if src and src not in js_files:
-                js_files.append(urljoin(base_url, src))
-        
         return js_files
     
     def _get_favicon_links(self, soup, base_url):
         """Estrae tutti i link favicon dalla pagina."""
         favicons = []
         
-        # Cerca tutti i link rel="icon" o rel="shortcut icon"
         for link in soup.find_all('link', rel=lambda r: r and ('icon' in r.lower())):
             href = link.get('href', '')
             if href:
@@ -455,38 +558,32 @@ class HTMLCollector(BaseCollector):
     
     def _check_robots(self, domain):
         """Verifica robots.txt con tentativi multipli."""
-        try:
-            # Tentativo 1: User-agent standard
-            response = self.session.get(f"{domain}/robots.txt", timeout=10)
-            
-            # Se fallisce, prova con user-agent Googlebot
-            if response.status_code != 200:
-                self.logger.info(f"  🔄 robots.txt status {response.status_code}, provo con Googlebot UA...")
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-                }
-                response = self.session.get(f"{domain}/robots.txt", headers=headers, timeout=10)
-            
-            content = response.text if response.status_code == 200 else ""
-            
-            sitemap_url = ''
-            for line in content.split('\n'):
-                if line.strip().lower().startswith('sitemap:'):
-                    sitemap_url = line.split(':', 1)[1].strip()
-                    break
-            
-            self.logger.info(f"  ✓ robots.txt trovato, sitemap dichiarata: {sitemap_url if sitemap_url else 'N/A'}")
-            
-            return {
-                'exists': bool(content),
-                'content': content,
-                'has_sitemap': bool(sitemap_url),
-                'sitemap_url': sitemap_url,
-                'status_code': response.status_code
-            }
-        except Exception as e:
-            self.logger.warning(f"  ⚠️  Errore robots.txt: {e}")
+        success, content = retry_with_user_agents(
+            f"{domain}/robots.txt",
+            self.session,
+            timeout=10,
+            logger=self.logger
+        )
+        
+        if not success or not content:
+            self.logger.warning(f"  ⚠️  robots.txt non accessibile")
             return {'exists': False, 'content': '', 'has_sitemap': False, 'sitemap_url': '', 'status_code': 0}
+        
+        sitemap_url = ''
+        for line in content.split('\n'):
+            if line.strip().lower().startswith('sitemap:'):
+                sitemap_url = line.split(':', 1)[1].strip()
+                break
+        
+        self.logger.info(f"  ✓ robots.txt trovato, sitemap dichiarata: {sitemap_url if sitemap_url else 'N/A'}")
+        
+        return {
+            'exists': True,
+            'content': content,
+            'has_sitemap': bool(sitemap_url),
+            'sitemap_url': sitemap_url,
+            'status_code': 200
+        }
     
     def _check_404(self, domain):
         try:
@@ -516,7 +613,7 @@ class HTMLCollector(BaseCollector):
         
         # 1. Aggiungi homepage
         urls.add(domain.rstrip('/'))
-        self.logger.info(f"  ✓ Homepage aggiunta: {domain}")
+        self.logger.debug(f"  ✓ Homepage aggiunta: {domain}")
         
         # 2. Prova a leggere la sitemap dal robots.txt
         sitemap_url = robots_data.get('sitemap_url', '')
@@ -540,97 +637,40 @@ class HTMLCollector(BaseCollector):
                 f"{domain}/sitemap/sitemap.xml",
                 f"{domain}/sitemap-index.xml"
             ]:
-                self.logger.info(f"    → Provo: {candidate}")
+                self.logger.debug(f"    → Provo: {candidate}")
                 sitemap_urls = self._download_and_parse_sitemap(candidate)
                 if sitemap_urls:
                     self.logger.info(f"    ✓ Trovate {len(sitemap_urls)} URL da {candidate}")
                     urls.update(sitemap_urls)
                     break
-                else:
-                    self.logger.info(f"    ✗ Non trovata o non parsabile")
         
         # 4. Aggiungi link interni dalla homepage
         internal_links = homepage_data.get('internal_links', [])
-        self.logger.info(f"  🔗 Link interni dalla homepage: {len(internal_links)}")
+        self.logger.debug(f"  🔗 Link interni dalla homepage: {len(internal_links)}")
         
         for link in internal_links:
             clean_link = link.split('#')[0]
             if clean_link:
                 urls.add(clean_link)
         
-        self.logger.info(f"  📊 Totale URL uniche raccolte: {len(urls)}")
+        self.logger.debug(f"  📊 Totale URL uniche raccolte: {len(urls)}")
         
         return list(urls)
     
     def _download_and_parse_sitemap(self, sitemap_url: str) -> List[str]:
         """Scarica e parsifica una sitemap con tentativi multipli."""
-        urls = []
+        success, content = retry_with_user_agents(
+            sitemap_url,
+            self.session,
+            timeout=15,
+            logger=self.logger
+        )
         
-        # Tentativo 1: User-agent standard
-        try:
-            self.logger.info(f"    📥 Download (UA standard): {sitemap_url}")
-            response = self.session.get(sitemap_url, timeout=15)
-            
-            if response.status_code == 200:
-                content = response.text
-                self.logger.info(f"    📄 Scaricata: {len(content)} bytes")
-                
-                # Parsa la sitemap
-                parsed_urls = self._parse_sitemap_content(content, sitemap_url)
-                if parsed_urls:
-                    return parsed_urls
-            else:
-                self.logger.info(f"    ⚠️  Status code: {response.status_code}")
-        except Exception as e:
-            self.logger.warning(f"    ⚠️  Errore UA standard: {e}")
+        if not success or not content:
+            return []
         
-        # Tentativo 2: User-agent Googlebot
-        try:
-            self.logger.info(f"    📥 Download (UA Googlebot): {sitemap_url}")
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-            }
-            response = self.session.get(sitemap_url, headers=headers, timeout=15)
-            
-            if response.status_code == 200:
-                content = response.text
-                self.logger.info(f"    📄 Scaricata: {len(content)} bytes")
-                
-                # Parsa la sitemap
-                parsed_urls = self._parse_sitemap_content(content, sitemap_url)
-                if parsed_urls:
-                    return parsed_urls
-            else:
-                self.logger.info(f"    ⚠️  Status code: {response.status_code}")
-        except Exception as e:
-            self.logger.warning(f"    ⚠️  Errore UA Googlebot: {e}")
-        
-        # Tentativo 3: User-agent browser completo
-        try:
-            self.logger.info(f"    📥 Download (UA browser): {sitemap_url}")
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-            }
-            response = self.session.get(sitemap_url, headers=headers, timeout=15)
-            
-            if response.status_code == 200:
-                content = response.text
-                self.logger.info(f"    📄 Scaricata: {len(content)} bytes")
-                
-                # Parsa la sitemap
-                parsed_urls = self._parse_sitemap_content(content, sitemap_url)
-                if parsed_urls:
-                    return parsed_urls
-            else:
-                self.logger.info(f"    ⚠️  Status code: {response.status_code}")
-        except Exception as e:
-            self.logger.warning(f"    ⚠️  Errore UA browser: {e}")
-        
-        return []
+        self.logger.debug(f"    📄 Scaricata: {len(content)} bytes")
+        return self._parse_sitemap_content(content, sitemap_url)
     
     def _parse_sitemap_content(self, content: str, base_url: str) -> List[str]:
         """Parsa il contenuto di una sitemap (anche sitemap index)."""
@@ -639,32 +679,27 @@ class HTMLCollector(BaseCollector):
         try:
             # Controlla se è un sitemap index
             if '<sitemapindex' in content:
-                self.logger.info(f"    🗂️  Sitemap index rilevato")
-                # Estrai URL delle sotto-sitemap
+                self.logger.debug(f"    🗂️  Sitemap index rilevato")
                 sub_sitemaps = re.findall(r'<loc>(.*?)</loc>', content)
-                self.logger.info(f"    📋 Trovate {len(sub_sitemaps)} sotto-sitemap")
+                self.logger.debug(f"    📋 Trovate {len(sub_sitemaps)} sotto-sitemap")
                 
                 for sub_url in sub_sitemaps:
                     sub_url = sub_url.strip()
-                    self.logger.info(f"      → Parsing sotto-sitemap: {sub_url}")
+                    self.logger.debug(f"      → Parsing sotto-sitemap: {sub_url}")
                     sub_urls = self._download_and_parse_sitemap(sub_url)
                     urls.extend(sub_urls)
-                    self.logger.info(f"      ✓ {len(sub_urls)} URL dalla sotto-sitemap")
+                    self.logger.debug(f"      ✓ {len(sub_urls)} URL dalla sotto-sitemap")
             elif '<urlset' in content:
-                # Sitemap normale
-                self.logger.info(f"    📄 Sitemap normale, parsing URL...")
+                self.logger.debug(f"    📄 Sitemap normale, parsing URL...")
                 found_urls = re.findall(r'<loc>(.*?)</loc>', content)
                 urls.extend([u.strip() for u in found_urls])
-                self.logger.info(f"    ✓ {len(urls)} URL trovate")
+                self.logger.debug(f"    ✓ {len(urls)} URL trovate")
             else:
-                # Prova a parsare come XML generico
-                self.logger.info(f"    ⚠️  Formato non standard, provo parsing XML generico...")
+                self.logger.debug(f"    ⚠️  Formato non standard, provo parsing XML generico...")
                 found_urls = re.findall(r'<loc>(.*?)</loc>', content)
                 if found_urls:
                     urls.extend([u.strip() for u in found_urls])
-                    self.logger.info(f"    ✓ {len(urls)} URL trovate (parsing generico)")
-                else:
-                    self.logger.warning(f"    ✗ Nessun URL trovato nel contenuto")
+                    self.logger.debug(f"    ✓ {len(urls)} URL trovate (parsing generico)")
         
         except Exception as e:
             self.logger.error(f"    ✗ Errore parsing sitemap: {e}")
@@ -707,7 +742,7 @@ class HTMLCollector(BaseCollector):
                 else:
                     error_count += 1
                 
-                time.sleep(0.3)  # Pausa per non sovraccaricare il server
+                time.sleep(0.3)
             except Exception as e:
                 self.logger.warning(f"  ⚠️  Errore analisi {url}: {e}")
                 error_count += 1
@@ -765,7 +800,6 @@ class HTMLCollector(BaseCollector):
         char_count = len(title_text)
         pixel_width = self._estimate_pixel_width(title_text, is_title=True)
         
-        # Controlla problemi
         if char_count > 60:
             problems.append({
                 'url': url,
@@ -850,21 +884,17 @@ class HTMLCollector(BaseCollector):
         
         problem_list = []
         
-        # H1 assente
         if len(h1_list) == 0:
             problem_list.append('Assente')
         
-        # H1 multiplo
         if len(h1_list) > 1:
             problem_list.append('Multiplo')
         
-        # H1 troppo lungo
         for h1 in h1_list:
             if len(h1) > 70:
                 problem_list.append(f'Oltre 70 caratteri ({len(h1)})')
                 break
         
-        # H1 duplicato (stesso testo in più H1)
         if len(h1_list) > 1 and len(set(h1_list)) < len(h1_list):
             problem_list.append('Duplicato')
         
@@ -879,38 +909,10 @@ class HTMLCollector(BaseCollector):
         return problems
     
     def _analyze_images_deep(self, soup: BeautifulSoup, url: str) -> List[Dict]:
-        """Analizza le immagini e rileva problemi (alt, dimensioni, peso).
-        Filtra automaticamente: SVG inline, tracking pixel, Gravatar, URL non validi."""
+        """Analizza le immagini e rileva problemi (alt, dimensioni, peso)."""
         problems = []
         seen_urls = set()
         skipped_count = 0
-        
-        # Pattern da filtrare (rumore noto)
-        skip_patterns = [
-            # Data URI (SVG inline, base64)
-            r'^data:',
-            # Tracking pixel
-            r'linkedin\.com/collect',
-            r'facebook\.com/tr',
-            r'google-analytics\.com',
-            r'googletagmanager\.com',
-            r'px\.ads\.linkedin\.com',
-            r'connect\.facebook\.net',
-            r'analytics\.google\.com',
-            # Gravatar (avatar WordPress)
-            r'secure\.gravatar\.com',
-            r'www\.gravatar\.com',
-            # URL con typo evidenti (es. "0arkys" invece di "arkys")
-            r'^https?://0[a-z]',
-            # Pixel di monitoraggio comuni
-            r'pixel\.',
-            r'tracking\.',
-            r'beacon\.',
-            # Placeholder images
-            r'placeholder\.',
-            r'dummyimage\.com',
-            r'via\.placeholder',
-        ]
         
         domain_base = urlparse(url).netloc
         
@@ -926,47 +928,36 @@ class HTMLCollector(BaseCollector):
                 continue
             seen_urls.add(full_src)
             
-            # 2. Applica filtri anti-rumore
-            should_skip = False
-            for pattern in skip_patterns:
-                if re.search(pattern, full_src, re.IGNORECASE):
-                    should_skip = True
-                    skipped_count += 1
-                    break
-            
-            if should_skip:
+            # 2. Applica filtri anti-rumore (usa helper centralizzato)
+            if should_skip_image(full_src):
+                skipped_count += 1
                 continue
             
-            # 3. Filtra immagini esterne non pertinenti (opzionale)
+            # 3. Filtra immagini esterne non pertinenti
             img_domain = urlparse(full_src).netloc
             if img_domain and img_domain != domain_base:
-                # Permetti solo CDN noti o domini correlati
                 if not any(cdn in img_domain for cdn in ['cdn', 'media', 'static', 'images', 'img']):
-                    # Se è un dominio completamente esterno, skip
                     if not img_domain.endswith(domain_base.replace('www.', '')):
                         skipped_count += 1
                         continue
             
-            # 4. Analizza l'immagine (alt, dimensioni, peso)
+            # 4. Analizza l'immagine
             alt = img.get('alt', '')
             width = img.get('width')
             height = img.get('height')
             
-            # Problema: alt mancante
             if not alt or alt.strip() == '':
                 problems.append({
                     'url': full_src,
                     'problem': 'Testo alt mancante'
                 })
             
-            # Problema: dimensioni mancanti
             if not width or not height:
                 problems.append({
                     'url': full_src,
                     'problem': 'Attributi di dimensione mancanti'
                 })
             
-            # Problema: peso > 100kb
             img_size_kb = self._get_image_size_kb(full_src)
             if img_size_kb is not None and img_size_kb > 100:
                 problems.append({
@@ -975,11 +966,11 @@ class HTMLCollector(BaseCollector):
                 })
         
         if skipped_count > 0:
-            self.logger.info(f"  🎯 Filtrate {skipped_count} immagini non pertinenti (tracking/SVG/Gravatar)")
+            self.logger.debug(f"  🎯 Filtrate {skipped_count} immagini non pertinenti")
         
         return problems
     
-    def _get_image_size_kb(self, image_url: str) -> float:
+    def _get_image_size_kb(self, image_url: str) -> Optional[float]:
         """Ottiene la dimensione di un'immagine in KB (HEAD request)."""
         try:
             response = self.session.head(image_url, timeout=5, allow_redirects=True)
@@ -996,12 +987,7 @@ class HTMLCollector(BaseCollector):
         if not text:
             return 0
         
-        # Fattore pixel per carattere (stima)
-        if is_title:
-            px_per_char = 8.5
-        else:
-            px_per_char = 6.8
-        
+        px_per_char = 8.5 if is_title else 6.8
         return int(len(text) * px_per_char)
     
     # ============================================
@@ -1235,35 +1221,25 @@ class HTMLCollector(BaseCollector):
             'default_favicon_exists': False
         }
         
-        # Analizza i favicon link trovati
         for fav in favicon_links:
             href = fav.get('href', '')
             rel = fav.get('rel', '').lower()
             fav_type = fav.get('type', '').lower()
-            sizes = fav.get('sizes', '')
             
             result['favicon_urls'].append(href)
             
-            # Identifica il tipo
             if 'apple-touch' in rel:
                 result['has_apple_touch'] = True
             if 'manifest' in rel:
                 result['has_manifest'] = True
             
-            if 'svg' in fav_type:
+            if 'svg' in fav_type or href.endswith('.svg'):
                 result['types'].append('svg')
-            elif 'png' in fav_type:
+            elif 'png' in fav_type or href.endswith('.png'):
                 result['types'].append('png')
-            elif 'ico' in fav_type:
-                result['types'].append('ico')
-            elif href.endswith('.svg'):
-                result['types'].append('svg')
-            elif href.endswith('.png'):
-                result['types'].append('png')
-            elif href.endswith('.ico'):
+            elif 'ico' in fav_type or href.endswith('.ico'):
                 result['types'].append('ico')
         
-        # Verifica favicon di default (/favicon.ico)
         try:
             default_url = f"{domain.rstrip('/')}/favicon.ico"
             response = self.session.head(default_url, timeout=5, allow_redirects=True)
@@ -1274,9 +1250,8 @@ class HTMLCollector(BaseCollector):
         except:
             pass
         
-        # Determina se ha una favicon valida
         result['has_favicon'] = len(result['favicon_urls']) > 0 or result['default_favicon_exists']
-        result['types'] = list(set(result['types']))  # Rimuovi duplicati
+        result['types'] = list(set(result['types']))
         
         return result
     
@@ -1307,7 +1282,7 @@ class HTMLCollector(BaseCollector):
         
         site_type = 'blog_news' if blog_signals >= 3 else 'corporate'
         
-        self.logger.info(f"  📝 Tipo sito rilevato: {site_type} (segnali: {blog_signals})")
+        self.logger.debug(f"  📝 Tipo sito rilevato: {site_type} (segnali: {blog_signals})")
         
         return site_type
     

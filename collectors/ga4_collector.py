@@ -1,306 +1,314 @@
 import os
 import yaml
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
 from collectors.base_collector import BaseCollector
 
+
+# ---------------------------------------------------------------------------
+# HELPER 1 — Configurazione query GA4 (elimina duplicazioni)
+# ---------------------------------------------------------------------------
+GA4_SCOPES = ['https://www.googleapis.com/auth/analytics.readonly']
+
+# Date range standard
+DEFAULT_DATE_RANGE_DAYS = 28
+
+# Metriche predefinite per tipo di report
+GA4_METRICS = {
+    'overview': ['sessions', 'totalUsers', 'screenPageViews'],
+    'engagement': ['bounceRate', 'averageSessionDuration'],
+    'sources': ['sessions'],
+    'devices': ['sessions'],
+    'pages': ['screenPageViews'],
+}
+
+# Dimensione predefinite per tipo di report
+GA4_DIMENSIONS = {
+    'sources': 'sessionDefaultChannelGroup',
+    'devices': 'deviceCategory',
+    'pages': 'pagePath',
+}
+
+
+def get_date_range(days_back: int = DEFAULT_DATE_RANGE_DAYS) -> Dict[str, str]:
+    """Calcola date range per query GA4."""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_back)
+    
+    return {
+        'start': start_date.strftime('%Y-%m-%d'),
+        'end': end_date.strftime('%Y-%m-%d'),
+    }
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Converte valore in float in modo sicuro."""
+    try:
+        return float(value) if value else default
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """Converte valore in int in modo sicuro."""
+    try:
+        return int(value) if value else default
+    except (ValueError, TypeError):
+        return default
+
+
 class GA4Collector(BaseCollector):
-    """Raccoglie dati da Google Analytics 4 API con lookup ibrido (file YAML + fallback automatico)."""
+    """Raccoglie dati da Google Analytics 4."""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.service_account_file = config.get("GA4_SERVICE_ACCOUNT_FILE", "credentials/service-account.json")
-        self.property_cache = {}
-        
-        # Carica la mappatura dal file YAML
-        self.properties_map = self._load_properties_map()
-    
-    def _load_properties_map(self) -> Dict[str, str]:
-        """Carica la mappatura dominio → Property ID dal file YAML."""
-        yaml_path = "ga4_properties.yaml"
-        if not os.path.exists(yaml_path):
-            self.logger.warning(f"⚠️  File {yaml_path} non trovato. Creo template vuoto.")
-            # Crea un template vuoto
-            with open(yaml_path, 'w', encoding='utf-8') as f:
-                f.write("# Mappatura domini → Property ID GA4\n")
-                f.write("# Aggiungi qui tutti i clienti con il loro Property ID\n\n")
-                f.write("properties:\n")
-                f.write("  # esempio.com: \"123456789\"\n")
-            return {}
-        
-        try:
-            with open(yaml_path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f) or {}
-                properties = data.get('properties', {})
-                self.logger.info(f"  ✓ Caricati {len(properties)} domini da ga4_properties.yaml")
-                return properties
-        except Exception as e:
-            self.logger.error(f"Errore lettura ga4_properties.yaml: {e}")
-            return {}
+        self.credentials_file = config.get("GA4_CREDENTIALS_FILE", "credentials/ga4-credentials.json")
+        self.properties_file = "ga4_properties.yaml"
+        self._client = None
     
     def is_available(self) -> bool:
-        return bool(self.service_account_file and os.path.exists(self.service_account_file))
+        """Verifica se le credenziali GA4 sono configurate."""
+        return bool(self.credentials_file and os.path.exists(self.credentials_file))
     
-    def _get_data_client(self):
-        """Crea il client per i dati analytics."""
+    def _get_property_id(self, domain: str) -> Optional[str]:
+        """Ottiene il Property ID per il dominio dal file di configurazione."""
+        try:
+            if not os.path.exists(self.properties_file):
+                return None
+            
+            with open(self.properties_file, 'r', encoding='utf-8') as f:
+                properties = yaml.safe_load(f)
+            
+            clean_domain = domain.replace('https://', '').replace('http://', '').replace('www.', '')
+            
+            # Match esatto
+            if clean_domain in properties:
+                return properties[clean_domain].get('property_id')
+            
+            # Match parziale
+            for d, data in properties.items():
+                if clean_domain in d or d in clean_domain:
+                    return data.get('property_id')
+            
+            return None
+        except Exception as e:
+            self.logger.warning(f"Errore lettura property ID: {e}")
+            return None
+    
+    def _get_client(self):
+        """Crea il client GA4 (con cache)."""
+        if self._client:
+            return self._client
+        
         try:
             from google.analytics.data_v1beta import BetaAnalyticsDataClient
             from google.oauth2 import service_account
             
             credentials = service_account.Credentials.from_service_account_file(
-                self.service_account_file
+                self.credentials_file,
+                scopes=GA4_SCOPES
             )
-            return BetaAnalyticsDataClient(credentials=credentials)
+            
+            self._client = BetaAnalyticsDataClient(credentials=credentials)
+            return self._client
+            
+        except ImportError as e:
+            self.logger.error(f"Librerie Google Analytics non installate: {e}")
+            self.logger.error("Esegui: pip install google-analytics-data")
+            return None
         except Exception as e:
-            self.logger.error(f"Errore autenticazione GA4 Data: {e}")
+            self.logger.error(f"Errore autenticazione GA4: {e}")
             return None
     
-    def _find_property_for_domain(self, domain: str) -> str:
-        """Trova il Property ID per un dominio (lookup ibrido)."""
+    def _run_query(self, client, property_id: str, dates: Dict[str, str],
+                   metrics: List[str], dimensions: Optional[List[str]] = None,
+                   order_by: Optional[str] = None, limit: int = 10) -> List[Dict]:
+        """Esegue una query GA4 standardizzata.
         
-        # Pulisci il dominio
-        clean_domain = domain.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
+        Args:
+            client: Client GA4
+            property_id: ID property GA4
+            dates: Dict con 'start' e 'end'
+            metrics: Lista nomi metriche
+            dimensions: Lista nomi dimensioni (opzionale)
+            order_by: Nome metrica per ordinamento (opzionale)
+            limit: Limite risultati
         
-        # 1. Controlla la cache
-        if clean_domain in self.property_cache:
-            self.logger.info(f"  ✓ Property ID trovato in cache per {clean_domain}")
-            return self.property_cache[clean_domain]
-        
-        # 2. Cerca nel file YAML (metodo principale)
-        if clean_domain in self.properties_map:
-            property_id = self.properties_map[clean_domain]
-            self.logger.info(f"  ✓ Property ID trovato in ga4_properties.yaml: {property_id}")
-            self.property_cache[clean_domain] = property_id
-            return property_id
-        
-        # 3. Fallback: prova varianti del dominio
-        variants = [
-            clean_domain,
-            clean_domain.replace('www.', ''),
-            f"www.{clean_domain}",
-        ]
-        
-        for variant in variants:
-            if variant in self.properties_map:
-                property_id = self.properties_map[variant]
-                self.logger.info(f"  ✓ Property ID trovato per variante '{variant}': {property_id}")
-                self.property_cache[clean_domain] = property_id
-                return property_id
-        
-        # 4. Nessun Property ID trovato
-        self.logger.warning(f"  ⚠️  Nessun Property ID configurato per {clean_domain}")
-        self.logger.info(f"  ℹ️  Aggiungi '{clean_domain}' al file ga4_properties.yaml")
-        
-        if self.properties_map:
-            self.logger.info(f"  ℹ️  Domini configurati:")
-            for d, pid in self.properties_map.items():
-                self.logger.info(f"    → {d}: {pid}")
-        
-        return ""
+        Returns:
+            Lista di dict con risultati
+        """
+        try:
+            from google.analytics.data_v1beta.types import (
+                DateRange, Dimension, Metric, RunReportRequest, OrderBy
+            )
+            
+            # Costruisci request
+            request_params = {
+                'property': f"properties/{property_id}",
+                'date_ranges': [DateRange(start_date=dates['start'], end_date=dates['end'])],
+                'metrics': [Metric(name=m) for m in metrics],
+            }
+            
+            if dimensions:
+                request_params['dimensions'] = [Dimension(name=d) for d in dimensions]
+            
+            if order_by:
+                request_params['order_bys'] = [
+                    OrderBy(metric=OrderBy.MetricOrderBy(metric_name=order_by), desc=True)
+                ]
+            
+            if limit:
+                request_params['limit'] = limit
+            
+            request = RunReportRequest(**request_params)
+            response = client.run_report(request)
+            
+            # Estrai risultati
+            results = []
+            for row in response.rows:
+                row_data = {}
+                
+                # Dimensioni
+                if dimensions:
+                    for i, dim in enumerate(dimensions):
+                        row_data[dim] = row.dimension_values[i].value
+                
+                # Metriche
+                for i, metric in enumerate(metrics):
+                    row_data[metric] = row.metric_values[i].value
+                
+                results.append(row_data)
+            
+            return results
+            
+        except Exception as e:
+            self.logger.warning(f"Errore query GA4: {e}")
+            return []
     
     def collect(self, domain: str) -> Dict[str, Any]:
+        """Raccoglie tutti i dati GA4 per il dominio."""
         if not self.is_available():
-            self.logger.warning("GA4 non configurato. Skip.")
+            self.logger.warning("Credenziali GA4 non configurate. Skip.")
+            return {}
+        
+        property_id = self._get_property_id(domain)
+        if not property_id:
+            self.logger.warning(f"Nessun Property ID trovato per {domain}")
             return {}
         
         self.logger.info(f"🔍 Raccolta dati GA4 per {domain}...")
+        self.logger.debug(f"  ✓ Property ID trovato: {property_id}")
         
-        # Trova il Property ID per questo dominio
-        property_id = self._find_property_for_domain(domain)
-        
-        if not property_id:
+        client = self._get_client()
+        if not client:
             return {}
         
-        # Usa il data client per raccogliere i dati
-        data_client = self._get_data_client()
-        if not data_client:
-            return {}
+        # Date range standard
+        dates = get_date_range()
         
-        try:
-            results = {}
-            
-            # 1. Overview
-            results['overview'] = self._get_overview(data_client, property_id)
-            
-            # 2. Top Pagine
-            results['top_pages'] = self._get_top_pages(data_client, property_id)
-            
-            # 3. Sorgenti di Traffico
-            results['traffic_sources'] = self._get_traffic_sources(data_client, property_id)
-            
-            # 4. Dispositivi
-            results['devices'] = self._get_devices(data_client, property_id)
-            
-            # 5. Engagement
-            results['engagement'] = self._get_engagement(data_client, property_id)
-            
-            self.logger.info(f"  ✓ Dati GA4 raccolti per property {property_id}")
-            
-        except Exception as e:
-            self.logger.error(f"  ✗ Errore raccolta dati GA4: {e}")
+        results = {}
+        
+        # 1. Overview
+        results['overview'] = self._get_overview(client, property_id, dates)
+        
+        # 2. Engagement
+        results['engagement'] = self._get_engagement(client, property_id, dates)
+        
+        # 3. Traffic sources
+        results['traffic_sources'] = self._get_traffic_sources(client, property_id, dates)
+        
+        # 4. Devices
+        results['devices'] = self._get_devices(client, property_id, dates)
+        
+        # 5. Top pages
+        results['top_pages'] = self._get_top_pages(client, property_id, dates)
+        
+        self.logger.info(f"  ✓ Dati GA4 raccolti per property {property_id}")
         
         return results
     
-    def _get_overview(self, client, property_id: str) -> Dict[str, Any]:
-        """Recupera sessioni, utenti e pagine viste."""
-        try:
-            from google.analytics.data_v1beta.types import DateRange, Metric, RunReportRequest
-            from datetime import datetime, timedelta
-            
-            request = RunReportRequest(
-                property=f"properties/{property_id}",
-                date_ranges=[DateRange(
-                    start_date=(datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d'),
-                    end_date=datetime.now().strftime('%Y-%m-%d')
-                )],
-                metrics=[
-                    Metric(name="sessions"),
-                    Metric(name="totalUsers"),
-                    Metric(name="screenPageViews"),
-                    Metric(name="sessionsPerUser"),
-                ]
-            )
-            
-            response = client.run_report(request)
-            
-            if response.rows:
-                row = response.rows[0]
-                return {
-                    'sessions': int(row.metric_values[0].value),
-                    'users': int(row.metric_values[1].value),
-                    'pageviews': int(row.metric_values[2].value),
-                    'sessions_per_user': float(row.metric_values[3].value),
-                }
+    def _get_overview(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene overview generale."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['overview']
+        )
+        
+        if not rows:
             return {}
-            
-        except Exception as e:
-            self.logger.warning(f"Errore overview GA4: {e}")
+        
+        row = rows[0]
+        return {
+            'sessions': safe_int(row.get('sessions', 0)),
+            'users': safe_int(row.get('totalUsers', 0)),
+            'pageviews': safe_int(row.get('screenPageViews', 0)),
+        }
+    
+    def _get_engagement(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene metriche di engagement."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['engagement']
+        )
+        
+        if not rows:
             return {}
+        
+        row = rows[0]
+        return {
+            'bounce_rate': safe_float(row.get('bounceRate', 0)),
+            'avg_session_duration': safe_float(row.get('averageSessionDuration', 0)),
+        }
     
-    def _get_top_pages(self, client, property_id: str) -> Dict[str, Any]:
-        """Recupera le top 10 pagine più visitate."""
-        try:
-            from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest, OrderBy
-            from datetime import datetime, timedelta
-            
-            request = RunReportRequest(
-                property=f"properties/{property_id}",
-                date_ranges=[DateRange(
-                    start_date=(datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d'),
-                    end_date=datetime.now().strftime('%Y-%m-%d')
-                )],
-                dimensions=[Dimension(name="pagePath")],
-                metrics=[Metric(name="screenPageViews")],
-                order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="screenPageViews"), desc=True)],
-                limit=10
-            )
-            
-            response = client.run_report(request)
-            
-            pages = []
-            for row in response.rows:
-                pages.append({
-                    'path': row.dimension_values[0].value,
-                    'views': int(row.metric_values[0].value)
-                })
-            
-            return {'pages': pages}
-            
-        except Exception as e:
-            self.logger.warning(f"Errore top pages GA4: {e}")
-            return {'pages': []}
+    def _get_traffic_sources(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene dati sulle sorgenti di traffico."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['sources'],
+            dimensions=[GA4_DIMENSIONS['sources']],
+            order_by='sessions',
+            limit=10
+        )
+        
+        sources = []
+        for row in rows:
+            sources.append({
+                'source': row.get('sessionDefaultChannelGroup', ''),
+                'sessions': safe_int(row.get('sessions', 0))
+            })
+        
+        return {'sources': sources}
     
-    def _get_traffic_sources(self, client, property_id: str) -> Dict[str, Any]:
-        """Recupera le sorgenti di traffico."""
-        try:
-            from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest
-            from datetime import datetime, timedelta
-            
-            request = RunReportRequest(
-                property=f"properties/{property_id}",
-                date_ranges=[DateRange(
-                    start_date=(datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d'),
-                    end_date=datetime.now().strftime('%Y-%m-%d')
-                )],
-                dimensions=[Dimension(name="sessionDefaultChannelGroup")],
-                metrics=[Metric(name="sessions")],
-                limit=10
-            )
-            
-            response = client.run_report(request)
-            
-            sources = []
-            for row in response.rows:
-                sources.append({
-                    'source': row.dimension_values[0].value,
-                    'sessions': int(row.metric_values[0].value)
-                })
-            
-            return {'sources': sources}
-            
-        except Exception as e:
-            self.logger.warning(f"Errore traffic sources GA4: {e}")
-            return {'sources': []}
+    def _get_devices(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene dati sui dispositivi."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['devices'],
+            dimensions=[GA4_DIMENSIONS['devices']]
+        )
+        
+        devices = {}
+        for row in rows:
+            device = row.get('deviceCategory', '').lower()
+            devices[device] = safe_int(row.get('sessions', 0))
+        
+        return {'devices': devices}
     
-    def _get_devices(self, client, property_id: str) -> Dict[str, Any]:
-        """Recupera la distribuzione per dispositivo."""
-        try:
-            from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest
-            from datetime import datetime, timedelta
-            
-            request = RunReportRequest(
-                property=f"properties/{property_id}",
-                date_ranges=[DateRange(
-                    start_date=(datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d'),
-                    end_date=datetime.now().strftime('%Y-%m-%d')
-                )],
-                dimensions=[Dimension(name="deviceCategory")],
-                metrics=[Metric(name="sessions")],
-            )
-            
-            response = client.run_report(request)
-            
-            devices = {}
-            for row in response.rows:
-                device = row.dimension_values[0].value
-                sessions = int(row.metric_values[0].value)
-                devices[device] = sessions
-            
-            return {'devices': devices}
-            
-        except Exception as e:
-            self.logger.warning(f"Errore devices GA4: {e}")
-            return {'devices': {}}
-    
-    def _get_engagement(self, client, property_id: str) -> Dict[str, Any]:
-        """Recupera metriche di engagement."""
-        try:
-            from google.analytics.data_v1beta.types import DateRange, Metric, RunReportRequest
-            from datetime import datetime, timedelta
-            
-            request = RunReportRequest(
-                property=f"properties/{property_id}",
-                date_ranges=[DateRange(
-                    start_date=(datetime.now() - timedelta(days=28)).strftime('%Y-%m-%d'),
-                    end_date=datetime.now().strftime('%Y-%m-%d')
-                )],
-                metrics=[
-                    Metric(name="averageSessionDuration"),
-                    Metric(name="bounceRate"),
-                    Metric(name="engagedSessions"),
-                ]
-            )
-            
-            response = client.run_report(request)
-            
-            if response.rows:
-                row = response.rows[0]
-                return {
-                    'avg_session_duration': float(row.metric_values[0].value),
-                    'bounce_rate': float(row.metric_values[1].value),
-                    'engaged_sessions': int(row.metric_values[2].value),
-                }
-            return {}
-            
-        except Exception as e:
-            self.logger.warning(f"Errore engagement GA4: {e}")
-            return {}
+    def _get_top_pages(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene le top pagine."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['pages'],
+            dimensions=[GA4_DIMENSIONS['pages']],
+            order_by='screenPageViews',
+            limit=10
+        )
+        
+        pages = []
+        for row in rows:
+            pages.append({
+                'path': row.get('pagePath', ''),
+                'views': safe_int(row.get('screenPageViews', 0))
+            })
+        
+        return {'pages': pages}
