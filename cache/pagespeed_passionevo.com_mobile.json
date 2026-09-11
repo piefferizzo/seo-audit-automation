@@ -1,0 +1,15 @@
+{
+  "url": "https://passionevo.com",
+  "strategy": "mobile",
+  "timestamp": "2026-09-11T16:49:13.341537",
+  "data": {
+    "performance_score": 60.0,
+    "accessibility_score": 93.0,
+    "lcp": 7.360099167111337,
+    "fcp": 4.9054120195674695,
+    "cls": 0.02303884079967047,
+    "tti": 7.3750991696452965,
+    "tbt": 194.3697980385141,
+    "si": 5.465869711259993
+  }
+}

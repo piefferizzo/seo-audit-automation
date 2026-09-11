@@ -1,11 +1,25 @@
 import logging
-import sys
 from rich.logging import RichHandler
 from rich.console import Console
 
-def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
-    """Configura e restituisce un logger con output formattato Rich."""
+
+# ---------------------------------------------------------------------------
+# COSTANTI — Configurazione logging
+# ---------------------------------------------------------------------------
+DEFAULT_LOG_LEVEL = logging.INFO
+LOG_FORMAT = "%(message)s"
+
+
+def setup_logger(name: str, level: int = DEFAULT_LOG_LEVEL) -> logging.Logger:
+    """Configura e restituisce un logger con output formattato Rich.
     
+    Args:
+        name: Nome del logger (tipicamente il nome della classe)
+        level: Livello di logging (default: INFO)
+    
+    Returns:
+        Logger configurato
+    """
     # Crea logger
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -27,27 +41,31 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     )
     
     # Formato per Rich
-    rich_handler.setFormatter(logging.Formatter('%(message)s'))
+    rich_handler.setFormatter(logging.Formatter(LOG_FORMAT))
     
     # Aggiungi handler
     logger.addHandler(rich_handler)
     
     return logger
 
+
 def print_success(message: str):
     """Stampa un messaggio di successo."""
     console = Console()
     console.print(f"[green]✓[/green] {message}")
+
 
 def print_error(message: str):
     """Stampa un messaggio di errore."""
     console = Console()
     console.print(f"[red]✗[/red] {message}")
 
+
 def print_warning(message: str):
     """Stampa un messaggio di warning."""
     console = Console()
     console.print(f"[yellow]⚠[/yellow] {message}")
+
 
 def print_info(message: str):
     """Stampa un messaggio informativo."""

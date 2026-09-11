@@ -4,16 +4,22 @@ SEO Audit Automation Tool
 Main script per eseguire audit SEO completi con multipli collector.
 """
 
+# Carica variabili d'ambiente PRIMA di tutto
+from dotenv import load_dotenv
+load_dotenv()
+
 import sys
 import os
 import argparse
 import yaml
 import traceback
 from datetime import datetime
+from typing import Dict, Any, Optional
+from pathlib import Path
+
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 # Import collector
 from collectors.pagespeed_collector import PageSpeedCollector
@@ -33,7 +39,67 @@ from utils.logger import setup_logger
 from utils.cache import CacheManager
 
 
-def load_config(config_path: str = "config.yaml") -> dict:
+# ---------------------------------------------------------------------------
+# COSTANTI — Configurazione e stili
+# ---------------------------------------------------------------------------
+DEFAULT_CONFIG_PATH = "config.yaml"
+REPORTS_DIR = "reports"
+CACHE_DIR = "cache"
+
+# Stili Rich
+STYLES = {
+    'title': 'bold cyan',
+    'success': 'green',
+    'warning': 'yellow',
+    'error': 'red',
+    'info': 'blue',
+    'domain': 'green',
+    'date': 'yellow',
+    'phase': 'bold',
+    'file_path': 'bold cyan',
+}
+
+# Icone per output
+ICONS = {
+    'success': '✓',
+    'warning': '⚠',
+    'error': '✗',
+    'info': 'ℹ',
+    'start': '⠋',
+    'rocket': '🚀',
+    'package': '📦',
+    'refresh': '🔄',
+    'chart': '📊',
+    'folder': '📁',
+    'search': '🔍',
+}
+
+# Mapping collector
+COLLECTOR_CLASSES = {
+    "pagespeed": PageSpeedCollector,
+    "gsc": GSCCollector,
+    "ga4": GA4Collector,
+    "html": HTMLCollector,
+    "whois": WhoisCollector,
+    #"semrush": SemrushCollector,
+    "manual": ManualCollector,
+}
+
+
+# ---------------------------------------------------------------------------
+# HELPER 1 — Normalizzazione dominio
+# ---------------------------------------------------------------------------
+def normalize_domain(domain: str) -> str:
+    """Normalizza il dominio aggiungendo https:// se necessario."""
+    if not domain.startswith('http'):
+        return f"https://{domain}"
+    return domain
+
+
+# ---------------------------------------------------------------------------
+# HELPER 2 — Caricamento configurazione
+# ---------------------------------------------------------------------------
+def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
     """Carica la configurazione dal file YAML."""
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -46,10 +112,13 @@ def load_config(config_path: str = "config.yaml") -> dict:
         sys.exit(1)
 
 
-def show_cache_stats(domain: str = None):
+# ---------------------------------------------------------------------------
+# HELPER 3 — Visualizzazione statistiche cache
+# ---------------------------------------------------------------------------
+def display_cache_stats(domain: Optional[str] = None):
     """Mostra le statistiche della cache."""
     console = Console()
-    cache = CacheManager(cache_dir="cache")
+    cache = CacheManager(cache_dir=CACHE_DIR)
     stats = cache.get_stats()
     
     table = Table(title="📊 Statistiche Cache PageSpeed")
@@ -63,139 +132,148 @@ def show_cache_stats(domain: str = None):
     console.print(table)
 
 
-def clear_cache(domain: str = None):
+# ---------------------------------------------------------------------------
+# HELPER 4 — Pulizia cache
+# ---------------------------------------------------------------------------
+def clear_cache(domain: Optional[str] = None):
     """Pulisce la cache."""
     console = Console()
-    cache = CacheManager(cache_dir="cache")
+    cache = CacheManager(cache_dir=CACHE_DIR)
     
     if domain:
         cache.clear(domain)
-        console.print(f"[green]✅ Cache PageSpeed cancellata per {domain}[/green]")
+        console.print(f"[{STYLES['success']}]✅ Cache PageSpeed cancellata per {domain}[/{STYLES['success']}]")
     else:
         cache.clear()
-        console.print("[green]✅ Tutta la cache è stata cancellata[/green]")
+        console.print(f"[{STYLES['success']}]✅ Tutta la cache è stata cancellata[/{STYLES['success']}]")
 
 
-def main(domain: str = None, clear_cache_flag: bool = False, cache_stats_flag: bool = False):
-    """Funzione principale per l'audit SEO."""
-    
-    # Gestione comandi cache
-    if cache_stats_flag:
-        show_cache_stats(domain)
-        return
-    
-    if clear_cache_flag:
-        clear_cache(domain)
-        return
-    
-    # Verifica dominio
-    if not domain:
-        print("❌ Errore: Dominio non specificato")
-        print("Uso: python main.py <dominio>")
-        print("Esempio: python main.py https://example.com")
-        sys.exit(1)
-    
-    # Normalizza dominio
-    if not domain.startswith('http'):
-        domain = f"https://{domain}"
-    
-    # Setup
-    console = Console()
-    logger = setup_logger("Main")
-    config = load_config()
-    
-    console.print(Panel(
-        f"[bold cyan]🚀 SEO Audit Automation Tool[/bold cyan]\n\n"
-        f"  Dominio: [green]{domain}[/green]\n"
-        f"  Data: [yellow]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/yellow]",
-        title="Audit SEO",
-        border_style="blue"
-    ))
-    
-    # Inizializza collector
-    console.print("\n[bold]📦 Fase 1: Raccolta dati[/bold]")
-    
-    collectors = {
-        "pagespeed": PageSpeedCollector(config),
-        "gsc": GSCCollector(config),
-        "ga4": GA4Collector(config),
-        "html": HTMLCollector(config),
-        "whois": WhoisCollector(config),
-        #"semrush": SemrushCollector(config),
-        "manual": ManualCollector(config),
+# ---------------------------------------------------------------------------
+# HELPER 5 — Inizializzazione collector
+# ---------------------------------------------------------------------------
+def initialize_collectors(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Inizializza tutti i collector."""
+    return {
+        name: collector_class(config)
+        for name, collector_class in COLLECTOR_CLASSES.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# HELPER 6 — Esecuzione collector con gestione errori
+# ---------------------------------------------------------------------------
+def run_collector(collector, domain: str, console: Console, logger) -> Optional[Dict[str, Any]]:
+    """Esegue un collector con gestione errori."""
+    collector_name = collector.__class__.__name__
     
-    # Raccolta dati
+    try:
+        if collector.is_available():
+            console.print(f"  [{STYLES['info']}]{ICONS['start']} Raccolta dati {collector_name}...[/{STYLES['info']}]")
+            data = collector.collect(domain)
+            console.print(f"  [{STYLES['success']}]{ICONS['success']} {collector_name} completato[/{STYLES['success']}]")
+            return data
+        else:
+            console.print(f"  [{STYLES['warning']}]{ICONS['warning']} {collector_name} non disponibile[/{STYLES['warning']}]")
+            return None
+    except Exception as e:
+        logger.error(f"Errore nel collector {collector_name}: {e}")
+        logger.error(traceback.format_exc())
+        console.print(f"  [{STYLES['error']}]{ICONS['error']} {collector_name} fallito: {e}[/{STYLES['error']}]")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# HELPER 7 — Raccolta dati da tutti i collector
+# ---------------------------------------------------------------------------
+def collect_all_data(collectors: Dict[str, Any], domain: str, console: Console, logger) -> Dict[str, Any]:
+    """Raccoglie dati da tutti i collector."""
     raw_data = {}
     
     for name, collector in collectors.items():
-        try:
-            if collector.is_available():
-                console.print(f"  [cyan]⠋[/cyan] Raccolta dati {name}...")
-                raw_data[name] = collector.collect(domain)
-                console.print(f"  [green]✓[/green] {name} completato")
-            else:
-                console.print(f"  [yellow]⚠[/yellow] {name} non disponibile")
-        except Exception as e:
-            logger.error(f"Errore nel collector {name}: {e}")
-            logger.error(traceback.format_exc())
-            console.print(f"  [red]✗[/red] {name} fallito: {e}")
+        data = run_collector(collector, domain, console, logger)
+        if data:
+            raw_data[name] = data
     
-    # Verifica dati raccolti
-    console.print("\n[bold]🔍 Verifica dati raccolti[/bold]")
+    return raw_data
+
+
+# ---------------------------------------------------------------------------
+# HELPER 8 — Visualizzazione verifica dati
+# ---------------------------------------------------------------------------
+def display_data_verification(collectors: Dict[str, Any], raw_data: Dict[str, Any], console: Console):
+    """Mostra la verifica dei dati raccolti."""
+    console.print(f"\n[{STYLES['phase']}]{ICONS['search']} Verifica dati raccolti[/{STYLES['phase']}]")
+    
     for name in collectors.keys():
-        status = "✓" if raw_data.get(name) else "✗"
-        color = "green" if raw_data.get(name) else "red"
-        console.print(f"  [{color}]{status}[/{color}] {name}: {bool(raw_data.get(name))}")
-    
-    # Elaborazione dati
-    console.print("\n[bold]🔄 Fase 2: Elaborazione dati[/bold]")
-    
+        has_data = bool(raw_data.get(name))
+        icon = ICONS['success'] if has_data else ICONS['error']
+        color = STYLES['success'] if has_data else STYLES['error']
+        console.print(f"  [{color}]{icon} {name}: {has_data}[/{color}]")
+
+
+# ---------------------------------------------------------------------------
+# HELPER 9 — Elaborazione dati
+# ---------------------------------------------------------------------------
+def process_data(domain: str, raw_data: Dict[str, Any], console: Console, logger) -> Dict[str, Any]:
+    """Elabora i dati grezzi."""
     try:
-        processor = AuditProcessor(config_path="config.yaml")
+        processor = AuditProcessor(config_path=DEFAULT_CONFIG_PATH)
         processed = processor.process(domain, raw_data)
         
-        console.print(f"  [green]✓[/green] Righe Audit generate: {len(processed['audit'])}")
-        console.print(f"  [green]✓[/green] Righe Checklist generate: {len(processed['checklist'])}")
-        console.print(f"  [green]✓[/green] Health Score: {processed['summary']['health_score']}/100")
+        console.print(f"  [{STYLES['success']}]{ICONS['success']} Righe Audit generate: {len(processed['audit'])}[/{STYLES['success']}]")
+        console.print(f"  [{STYLES['success']}]{ICONS['success']} Righe Checklist generate: {len(processed['checklist'])}[/{STYLES['success']}]")
+        console.print(f"  [{STYLES['success']}]{ICONS['success']} Health Score: {processed['summary']['health_score']}/100[/{STYLES['success']}]")
         
         # Verifica check PageSpeed
         ps_checks = [r for r in processed['audit'] if r.get('ID Audit', '').startswith('U-')]
-        console.print(f"  [green]✓[/green] Check PageSpeed trovati: {len(ps_checks)}")
+        console.print(f"  [{STYLES['success']}]{ICONS['success']} Check PageSpeed trovati: {len(ps_checks)}[/{STYLES['success']}]")
         for check in ps_checks:
             console.print(f"    - {check.get('ID Audit')}: {check.get('Elemento Analizzato')} - {check.get('Stato')}")
+        
+        return processed
         
     except Exception as e:
         logger.error(f"Errore nell'elaborazione: {e}")
         logger.error(traceback.format_exc())
-        console.print(f"  [red]✗ Errore nell'elaborazione: {e}[/red]")
+        console.print(f"  [{STYLES['error']}]{ICONS['error']} Errore nell'elaborazione: {e}[/{STYLES['error']}]")
         sys.exit(1)
-    
-    # Generazione report
-    console.print("\n[bold]📊 Fase 3: Generazione report[/bold]")
-    
+
+
+# ---------------------------------------------------------------------------
+# HELPER 10 — Generazione report
+# ---------------------------------------------------------------------------
+def generate_report(processed: Dict[str, Any], domain: str, raw_data: Dict[str, Any], console: Console, logger) -> str:
+    """Genera il report Excel."""
     # Crea directory reports se non esiste
-    os.makedirs("reports", exist_ok=True)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     
     # Genera nome file con timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     domain_clean = domain.replace('https://', '').replace('http://', '').replace('/', '_')
-    output_file = f"reports/AuditSEO_{domain_clean}_{timestamp}.xlsx"
+    output_file = f"{REPORTS_DIR}/AuditSEO_{domain_clean}_{timestamp}.xlsx"
     
     try:
         generator = ExcelGenerator()
-        generator.generate(processed, output_file)
-        console.print(f"\n[green]✅ Completato![/green]")
-        console.print(f"📁 Report salvato in: [bold cyan]{output_file}[/bold cyan]")
+        generator.generate(processed, output_file, raw_data)  # ← raw_data passato al generator
+        console.print(f"\n[{STYLES['success']}]✅ Completato![/{STYLES['success']}]")
+        console.print(f"{ICONS['folder']} Report salvato in: [{STYLES['file_path']}]{output_file}[/{STYLES['file_path']}]")
+        return output_file
+        
     except Exception as e:
         logger.error(f"Errore nella generazione del report: {e}")
         logger.error(traceback.format_exc())
-        console.print(f"  [red]✗ Errore nella generazione del report: {e}[/red]")
+        console.print(f"  [{STYLES['error']}]{ICONS['error']} Errore nella generazione del report: {e}[/{STYLES['error']}]")
         sys.exit(1)
-    
-    # Mostra statistiche cache
+
+
+# ---------------------------------------------------------------------------
+# HELPER 11 — Visualizzazione statistiche cache finali
+# ---------------------------------------------------------------------------
+def display_final_cache_stats(collectors: Dict[str, Any], console: Console):
+    """Mostra le statistiche finali della cache."""
     console.print()
     pagespeed_collector = collectors.get("pagespeed")
+    
     if pagespeed_collector and hasattr(pagespeed_collector, 'get_cache_stats'):
         cache_stats = pagespeed_collector.get_cache_stats()
         
@@ -210,6 +288,86 @@ def main(domain: str = None, clear_cache_flag: bool = False, cache_stats_flag: b
         console.print(table)
 
 
+# ---------------------------------------------------------------------------
+# HELPER 12 — Visualizzazione header audit
+# ---------------------------------------------------------------------------
+def display_audit_header(domain: str, console: Console):
+    """Mostra l'header dell'audit."""
+    console.print(Panel(
+        f"[{STYLES['title']}]{ICONS['rocket']} SEO Audit Automation Tool[/{STYLES['title']}]\n\n"
+        f"  Dominio: [{STYLES['domain']}]{domain}[/{STYLES['domain']}]\n"
+        f"  Data: [{STYLES['date']}]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/{STYLES['date']}]",
+        title="Audit SEO",
+        border_style="blue"
+    ))
+
+
+# ---------------------------------------------------------------------------
+# FUNZIONE PRINCIPALE
+# ---------------------------------------------------------------------------
+def main(domain: Optional[str] = None, clear_cache_flag: bool = False, cache_stats_flag: bool = False):
+    """Funzione principale per l'audit SEO."""
+    
+    # Gestione comandi cache
+    if cache_stats_flag:
+        display_cache_stats(domain)
+        return
+    
+    if clear_cache_flag:
+        clear_cache(domain)
+        return
+    
+    # Verifica dominio
+    if not domain:
+        print("❌ Errore: Dominio non specificato")
+        print("Uso: python main.py <dominio>")
+        print("Esempio: python main.py https://example.com")
+        sys.exit(1)
+    
+    # Normalizza dominio
+    domain = normalize_domain(domain)
+    
+    # Setup
+    console = Console()
+    logger = setup_logger("Main")
+    config = load_config()
+    
+    # Header
+    display_audit_header(domain, console)
+    
+    # ============================================
+    # FASE 1: RACCOLTA DATI
+    # ============================================
+    console.print(f"\n[{STYLES['phase']}]{ICONS['package']} Fase 1: Raccolta dati[/{STYLES['phase']}]")
+    
+    collectors = initialize_collectors(config)
+    raw_data = collect_all_data(collectors, domain, console, logger)  # ← raw_data definito qui
+    
+    # Verifica dati raccolti
+    display_data_verification(collectors, raw_data, console)
+    
+    # ============================================
+    # FASE 2: ELABORAZIONE DATI
+    # ============================================
+    console.print(f"\n[{STYLES['phase']}]{ICONS['refresh']} Fase 2: Elaborazione dati[/{STYLES['phase']}]")
+    
+    processed = process_data(domain, raw_data, console, logger)
+    
+    # ============================================
+    # FASE 3: GENERAZIONE REPORT
+    # ============================================
+    console.print(f"\n[{STYLES['phase']}]{ICONS['chart']} Fase 3: Generazione report[/{STYLES['phase']}]")
+    
+    # ← raw_data passato a generate_report
+    generate_report(processed, domain, raw_data, console, logger)
+    
+    # Statistiche cache finali
+    display_final_cache_stats(collectors, console)
+
+
+# ---------------------------------------------------------------------------
+# ENTRY POINT
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
         parser = argparse.ArgumentParser(

@@ -1,14 +1,54 @@
 import json
-import os
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, Optional
 from utils.logger import setup_logger
+
+
+# ---------------------------------------------------------------------------
+# COSTANTI — Configurazione cache
+# ---------------------------------------------------------------------------
+DEFAULT_CACHE_DIR = "cache"
+DEFAULT_TTL_HOURS = 24
+STATS_FILE = "cache_stats.json"
+
+
+# ---------------------------------------------------------------------------
+# HELPER 1 — Generazione cache key
+# ---------------------------------------------------------------------------
+def generate_cache_key(prefix: str, url: str, strategy: str = "") -> str:
+    """Genera una cache key standardizzata."""
+    url_clean = url.replace('https://', '').replace('http://', '').replace('/', '_')
+    if strategy:
+        return f"{prefix}_{url_clean}_{strategy}"
+    return f"{prefix}_{url_clean}"
+
+
+# ---------------------------------------------------------------------------
+# HELPER 2 — Lettura/scrittura JSON sicura
+# ---------------------------------------------------------------------------
+def read_json_file(file_path: Path) -> Optional[Dict[str, Any]]:
+    """Legge un file JSON in modo sicuro."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def write_json_file(file_path: Path, data: Dict[str, Any]):
+    """Scrive un file JSON in modo sicuro."""
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        raise Exception(f"Errore scrittura file {file_path}: {e}")
+
 
 class CacheManager:
     """Gestisce la cache per i dati PageSpeed e altre API."""
     
-    def __init__(self, cache_dir: str = "cache", default_ttl_hours: int = 24):
+    def __init__(self, cache_dir: str = DEFAULT_CACHE_DIR, default_ttl_hours: int = DEFAULT_TTL_HOURS):
         self.cache_dir = Path(cache_dir)
         self.default_ttl_hours = default_ttl_hours
         self.logger = setup_logger("CacheManager")
@@ -17,32 +57,26 @@ class CacheManager:
         self.cache_dir.mkdir(exist_ok=True)
         
         # File statistiche cache
-        self.stats_file = self.cache_dir / "cache_stats.json"
+        self.stats_file = self.cache_dir / STATS_FILE
         
         # Carica statistiche esistenti
         self.stats = self._load_stats()
     
     def _load_stats(self) -> Dict[str, int]:
         """Carica le statistiche della cache."""
-        if self.stats_file.exists():
-            try:
-                with open(self.stats_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                pass
-        return {'hits': 0, 'misses': 0}
+        data = read_json_file(self.stats_file)
+        return data if data else {'hits': 0, 'misses': 0}
     
     def _save_stats(self):
         """Salva le statistiche della cache."""
         try:
-            with open(self.stats_file, 'w', encoding='utf-8') as f:
-                json.dump(self.stats, f, indent=2)
+            write_json_file(self.stats_file, self.stats)
         except Exception as e:
             self.logger.warning(f"Errore salvataggio statistiche cache: {e}")
     
     def get_pagespeed(self, url: str, strategy: str) -> Optional[Dict[str, Any]]:
         """Ottiene dati PageSpeed dalla cache se disponibili e non scaduti."""
-        cache_key = f"pagespeed_{url.replace('https://', '').replace('http://', '').replace('/', '_')}_{strategy}"
+        cache_key = generate_cache_key("pagespeed", url, strategy)
         cache_file = self.cache_dir / f"{cache_key}.json"
         
         if not cache_file.exists():
@@ -50,11 +84,14 @@ class CacheManager:
             self._save_stats()
             return None
         
+        cache_data = read_json_file(cache_file)
+        if not cache_data:
+            self.stats['misses'] += 1
+            self._save_stats()
+            return None
+        
+        # Verifica età
         try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                cache_data = json.load(f)
-            
-            # Verifica età
             cached_time = datetime.fromisoformat(cache_data['timestamp'])
             age_hours = (datetime.now() - cached_time).total_seconds() / 3600
             
@@ -78,7 +115,7 @@ class CacheManager:
     
     def save_pagespeed(self, url: str, strategy: str, data: Dict[str, Any]):
         """Salva dati PageSpeed nella cache."""
-        cache_key = f"pagespeed_{url.replace('https://', '').replace('http://', '').replace('/', '_')}_{strategy}"
+        cache_key = generate_cache_key("pagespeed", url, strategy)
         cache_file = self.cache_dir / f"{cache_key}.json"
         
         cache_data = {
@@ -89,8 +126,7 @@ class CacheManager:
         }
         
         try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, indent=2)
+            write_json_file(cache_file, cache_data)
             self.logger.debug(f"Dati PageSpeed salvati in cache per {url} ({strategy})")
         except Exception as e:
             self.logger.warning(f"Errore salvataggio cache per {url}: {e}")
@@ -116,7 +152,7 @@ class CacheManager:
             else:
                 # Pulisci tutta la cache
                 for cache_file in self.cache_dir.glob("*.json"):
-                    if cache_file.name != "cache_stats.json":
+                    if cache_file.name != STATS_FILE:
                         cache_file.unlink()
                 self.logger.info("Tutta la cache è stata pulita")
             

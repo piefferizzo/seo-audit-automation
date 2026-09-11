@@ -12,10 +12,21 @@ class BaseCollector(ABC):
     
     @abstractmethod
     def collect(self, domain: str) -> Dict[str, Any]:
-        """Raccoglie dati per il dominio specificato."""
+        """Raccoglie dati per il dominio specificato.
+        
+        Args:
+            domain: Dominio da analizzare (con o senza https://)
+        
+        Returns:
+            Dict con i dati raccolti
+        """
         pass
     
     @abstractmethod
     def is_available(self) -> bool:
-        """Verifica se il collector è disponibile (credenziali, API key, ecc.)."""
+        """Verifica se il collector è disponibile (credenziali, API key, ecc.).
+        
+        Returns:
+            True se il collector può essere usato, False altrimenti
+        """
         pass

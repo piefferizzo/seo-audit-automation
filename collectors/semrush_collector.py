@@ -1,68 +1,130 @@
 import requests
-from typing import Dict, Any
+import os
+from typing import Dict, Any, List
 from collectors.base_collector import BaseCollector
 
-class SemrushCollector(BaseCollector):
-    """Raccoglie dati da Semrush API (Site Audit + Backlink + Organic)."""
+
+# ---------------------------------------------------------------------------
+# COSTANTI — Configurazione Semrush API
+# ---------------------------------------------------------------------------
+SEMRUSH_API_URL = "https://api.semrush.com/"
+DEFAULT_TIMEOUT = 30
+
+
+# ---------------------------------------------------------------------------
+# HELPER 1 — Parsing risposta Semrush (formato CSV-like)
+# ---------------------------------------------------------------------------
+def parse_semrush_response(response_text: str) -> List[Dict[str, str]]:
+    """Parsa risposta Semrush (formato CSV con separatore ;)."""
+    lines = response_text.strip().split('\n')
+    if len(lines) < 2:
+        return []
     
-    BASE_URL = "https://api.semrush.com/"
+    headers = lines[0].split(';')
+    results = []
+    
+    for line in lines[1:]:
+        values = line.split(';')
+        results.append(dict(zip(headers, values)))
+    
+    return results
+
+
+class SemrushCollector(BaseCollector):
+    """Raccoglie dati da Semrush API."""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.api_key = config.get("SEMRUSH_API_KEY")
+        self.api_key = os.getenv('SEMRUSH_API_KEY') or config.get("SEMRUSH_API_KEY", "")
     
     def is_available(self) -> bool:
+        """Verifica se l'API key è configurata."""
         return bool(self.api_key)
     
-    def _call_api(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        params["key"] = self.api_key
-        try:
-            response = requests.get(self.BASE_URL, params=params, timeout=60)
-            response.raise_for_status()
-            # Semrush restituisce CSV o JSON a seconda del parametro
-            return response.json() if "json" in str(params) else {"raw": response.text}
-        except Exception as e:
-            self.logger.error(f"Errore Semrush: {e}")
-            return {}
-    
     def collect(self, domain: str) -> Dict[str, Any]:
+        """Raccoglie dati Semrush per il dominio."""
         if not self.is_available():
-            self.logger.warning("Semrush API key non configurata. Skip.")
+            self.logger.warning("API key Semrush non configurata. Skip.")
             return {}
         
         self.logger.info(f"🔍 Raccolta dati Semrush per {domain}...")
-        clean_domain = domain.replace("https://", "").replace("http://", "").rstrip("/")
         
-        results = {}
-        
-        # 1. Site Audit
-        self.logger.info("  → Site Audit...")
-        audit_params = {
-            "type": "domain_audit",
-            "domain": clean_domain,
-            "export_columns": "Dt,Dn,Rr,Url,Nr,To,Th,Or,Ts",
-            "export_escape": 1
-        }
-        results["site_audit"] = self._call_api(audit_params)
-        
-        # 2. Backlink Analytics
-        self.logger.info("  → Backlink Analytics...")
-        backlink_params = {
-            "type": "backlinks",
-            "domain": clean_domain,
-            "export_columns": "Dm,Rk,At,Fi,Fd,Lm,Tl,Fl",
-            "export_escape": 1
-        }
-        results["backlinks"] = self._call_api(backlink_params)
-        
-        # 3. Organic Research (keyword posizionate)
-        self.logger.info("  → Organic Research...")
-        organic_params = {
-            "type": "domain_rank",
-            "domain": clean_domain,
-            "export_columns": "Dm,Rk,Or,Ot,Oc,Kd,Nr"
-        }
-        results["organic"] = self._call_api(organic_params)
-        
-        self.logger.info("  ✓ Dati Semrush raccolti")
-        return results
+        try:
+            # Domain overview
+            overview = self._get_domain_overview(domain)
+            
+            # Organic keywords
+            keywords = self._get_organic_keywords(domain)
+            
+            # Backlinks
+            backlinks = self._get_backlinks(domain)
+            
+            return {
+                'overview': overview,
+                'keywords': keywords,
+                'backlinks': backlinks
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Errore raccolta dati Semrush: {e}")
+            return {}
+    
+    def _get_domain_overview(self, domain: str) -> Dict[str, Any]:
+        """Ottiene overview del dominio."""
+        try:
+            params = {
+                'key': self.api_key,
+                'type': 'domain_rank',
+                'domain': domain,
+                'export_columns': 'Dm,Rk,Or,Ot,Tr,Kw,Se,Do,At'
+            }
+            
+            response = requests.get(SEMRUSH_API_URL, params=params, timeout=DEFAULT_TIMEOUT)
+            if response.status_code == 200:
+                data = parse_semrush_response(response.text)
+                return data[0] if data else {}
+            return {}
+        except Exception as e:
+            self.logger.warning(f"Errore domain overview: {e}")
+            return {}
+    
+    def _get_organic_keywords(self, domain: str) -> List[Dict[str, str]]:
+        """Ottiene keyword organiche."""
+        try:
+            params = {
+                'key': self.api_key,
+                'type': 'domain_organic',
+                'domain': domain,
+                'export_columns': 'Ph,Nq,Kd,Po,Tr',
+                'limit': 10
+            }
+            
+            response = requests.get(SEMRUSH_API_URL, params=params, timeout=DEFAULT_TIMEOUT)
+            if response.status_code == 200:
+                return parse_semrush_response(response.text)
+            return []
+        except Exception as e:
+            self.logger.warning(f"Errore organic keywords: {e}")
+            return []
+    
+    def _get_backlinks(self, domain: str) -> Dict[str, Any]:
+        """Ottiene dati backlink."""
+        try:
+            params = {
+                'key': self.api_key,
+                'type': 'backlinks',
+                'domain': domain,
+                'export_columns': 'Source,Target,Anchor,Tld'
+            }
+            
+            response = requests.get(SEMRUSH_API_URL, params=params, timeout=DEFAULT_TIMEOUT)
+            if response.status_code == 200:
+                lines = response.text.strip().split('\n')
+                return {
+                    'total': len(lines) - 1 if len(lines) > 1 else 0,
+                    'sample': lines[1:6] if len(lines) > 1 else []
+                }
+            return {'total': 0, 'sample': []}
+        except Exception as e:
+            self.logger.warning(f"Errore backlinks: {e}")
+            return {'total': 0, 'sample': []}

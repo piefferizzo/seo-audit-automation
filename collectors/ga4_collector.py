@@ -6,11 +6,9 @@ from collectors.base_collector import BaseCollector
 
 
 # ---------------------------------------------------------------------------
-# HELPER 1 — Configurazione query GA4 (elimina duplicazioni)
+# COSTANTI — Configurazione query GA4
 # ---------------------------------------------------------------------------
 GA4_SCOPES = ['https://www.googleapis.com/auth/analytics.readonly']
-
-# Date range standard
 DEFAULT_DATE_RANGE_DAYS = 28
 
 # Metriche predefinite per tipo di report
@@ -20,16 +18,31 @@ GA4_METRICS = {
     'sources': ['sessions'],
     'devices': ['sessions'],
     'pages': ['screenPageViews'],
+    'landing_pages': ['screenPageViews', 'sessions', 'engagedSessions', 'bounceRate', 'averageSessionDuration'],
+    'exit_pages': ['screenPageViews', 'sessions', 'bounceRate'],
+    'geo': ['sessions'],
+    'new_vs_returning': ['sessions'],
+    'trend': ['sessions'],
+    'comparison': ['sessions', 'totalUsers', 'bounceRate'],
+    'engaged': ['engagedSessions', 'engagementRate', 'averageSessionDuration'],
 }
 
-# Dimensione predefinite per tipo di report
+# Dimensioni predefinite per tipo di report
 GA4_DIMENSIONS = {
     'sources': 'sessionDefaultChannelGroup',
     'devices': 'deviceCategory',
     'pages': 'pagePath',
+    'landing_pages': 'unifiedPagePathScreen',
+    'exit_pages': 'unifiedPagePathScreen',
+    'geo': 'country',
+    'new_vs_returning': 'newVsReturning',
+    'trend': 'date',
 }
 
 
+# ---------------------------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------------------------
 def get_date_range(days_back: int = DEFAULT_DATE_RANGE_DAYS) -> Dict[str, str]:
     """Calcola date range per query GA4."""
     end_date = datetime.now()
@@ -68,29 +81,80 @@ class GA4Collector(BaseCollector):
     
     def is_available(self) -> bool:
         """Verifica se le credenziali GA4 sono configurate."""
-        return bool(self.credentials_file and os.path.exists(self.credentials_file))
+        if not self.credentials_file:
+            self.logger.debug("GA4_CREDENTIALS_FILE non configurato")
+            return False
+        
+        if not os.path.exists(self.credentials_file):
+            self.logger.debug(f"File credenziali GA4 non esiste: {self.credentials_file}")
+            return False
+        
+        return True
     
     def _get_property_id(self, domain: str) -> Optional[str]:
         """Ottiene il Property ID per il dominio dal file di configurazione."""
         try:
             if not os.path.exists(self.properties_file):
+                self.logger.debug(f"File {self.properties_file} non trovato")
                 return None
             
             with open(self.properties_file, 'r', encoding='utf-8') as f:
                 properties = yaml.safe_load(f)
             
+            if not properties:
+                return None
+            
             clean_domain = domain.replace('https://', '').replace('http://', '').replace('www.', '')
             
-            # Match esatto
-            if clean_domain in properties:
-                return properties[clean_domain].get('property_id')
+            # STRUTTURA 1: File con chiave "properties" (nuovo formato)
+            if 'properties' in properties:
+                props = properties['properties']
+                
+                if clean_domain in props:
+                    prop_id = props[clean_domain]
+                    if isinstance(prop_id, str):
+                        self.logger.debug(f"  ✓ Property ID trovato (nuovo formato): {prop_id}")
+                        return prop_id
+                    elif isinstance(prop_id, dict):
+                        prop_id = prop_id.get('property_id')
+                        self.logger.debug(f"  ✓ Property ID trovato (nuovo formato complesso): {prop_id}")
+                        return prop_id
+                
+                for d, prop_id in props.items():
+                    if clean_domain in d or d in clean_domain:
+                        if isinstance(prop_id, str):
+                            self.logger.debug(f"  ✓ Property ID trovato (match parziale): {prop_id}")
+                            return prop_id
+                        elif isinstance(prop_id, dict):
+                            prop_id = prop_id.get('property_id')
+                            self.logger.debug(f"  ✓ Property ID trovato (match parziale complesso): {prop_id}")
+                            return prop_id
             
-            # Match parziale
-            for d, data in properties.items():
-                if clean_domain in d or d in clean_domain:
-                    return data.get('property_id')
+            # STRUTTURA 2: File senza chiave "properties" (vecchio formato)
+            else:
+                if clean_domain in properties:
+                    prop_data = properties[clean_domain]
+                    if isinstance(prop_data, str):
+                        self.logger.debug(f"  ✓ Property ID trovato (vecchio formato): {prop_data}")
+                        return prop_data
+                    elif isinstance(prop_data, dict):
+                        prop_id = prop_data.get('property_id')
+                        self.logger.debug(f"  ✓ Property ID trovato (vecchio formato complesso): {prop_id}")
+                        return prop_id
+                
+                for d, prop_data in properties.items():
+                    if clean_domain in d or d in clean_domain:
+                        if isinstance(prop_data, str):
+                            self.logger.debug(f"  ✓ Property ID trovato (match parziale): {prop_data}")
+                            return prop_data
+                        elif isinstance(prop_data, dict):
+                            prop_id = prop_data.get('property_id')
+                            self.logger.debug(f"  ✓ Property ID trovato (match parziale complesso): {prop_id}")
+                            return prop_id
             
+            self.logger.warning(f"  ⚠️  {clean_domain} non trovato in {self.properties_file}")
             return None
+            
         except Exception as e:
             self.logger.warning(f"Errore lettura property ID: {e}")
             return None
@@ -123,26 +187,12 @@ class GA4Collector(BaseCollector):
     def _run_query(self, client, property_id: str, dates: Dict[str, str],
                    metrics: List[str], dimensions: Optional[List[str]] = None,
                    order_by: Optional[str] = None, limit: int = 10) -> List[Dict]:
-        """Esegue una query GA4 standardizzata.
-        
-        Args:
-            client: Client GA4
-            property_id: ID property GA4
-            dates: Dict con 'start' e 'end'
-            metrics: Lista nomi metriche
-            dimensions: Lista nomi dimensioni (opzionale)
-            order_by: Nome metrica per ordinamento (opzionale)
-            limit: Limite risultati
-        
-        Returns:
-            Lista di dict con risultati
-        """
+        """Esegue una query GA4 standardizzata."""
         try:
             from google.analytics.data_v1beta.types import (
                 DateRange, Dimension, Metric, RunReportRequest, OrderBy
             )
             
-            # Costruisci request
             request_params = {
                 'property': f"properties/{property_id}",
                 'date_ranges': [DateRange(start_date=dates['start'], end_date=dates['end'])],
@@ -163,17 +213,14 @@ class GA4Collector(BaseCollector):
             request = RunReportRequest(**request_params)
             response = client.run_report(request)
             
-            # Estrai risultati
             results = []
             for row in response.rows:
                 row_data = {}
                 
-                # Dimensioni
                 if dimensions:
                     for i, dim in enumerate(dimensions):
                         row_data[dim] = row.dimension_values[i].value
                 
-                # Metriche
                 for i, metric in enumerate(metrics):
                     row_data[metric] = row.metric_values[i].value
                 
@@ -203,36 +250,37 @@ class GA4Collector(BaseCollector):
         if not client:
             return {}
         
-        # Date range standard
         dates = get_date_range()
         
         results = {}
         
-        # 1. Overview
+        # Metriche base
         results['overview'] = self._get_overview(client, property_id, dates)
-        
-        # 2. Engagement
         results['engagement'] = self._get_engagement(client, property_id, dates)
-        
-        # 3. Traffic sources
         results['traffic_sources'] = self._get_traffic_sources(client, property_id, dates)
-        
-        # 4. Devices
         results['devices'] = self._get_devices(client, property_id, dates)
-        
-        # 5. Top pages
         results['top_pages'] = self._get_top_pages(client, property_id, dates)
+        
+        # Metriche avanzate (SEOZoom-like)
+        results['landing_pages'] = self._get_landing_pages(client, property_id, dates)
+        results['exit_pages'] = self._get_exit_pages(client, property_id, dates)
+        results['new_vs_returning'] = self._get_new_vs_returning(client, property_id, dates)
+        results['geo_distribution'] = self._get_geo_distribution(client, property_id, dates)
+        results['traffic_trend'] = self._get_traffic_trend(client, property_id, dates)
+        results['period_comparison'] = self._get_period_comparison(client, property_id, dates)
+        results['engaged_sessions'] = self._get_engaged_sessions(client, property_id, dates)
         
         self.logger.info(f"  ✓ Dati GA4 raccolti per property {property_id}")
         
         return results
     
+    # ---------------------------------------------------------------------------
+    # METRICHE BASE
+    # ---------------------------------------------------------------------------
+    
     def _get_overview(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
         """Ottiene overview generale."""
-        rows = self._run_query(
-            client, property_id, dates,
-            metrics=GA4_METRICS['overview']
-        )
+        rows = self._run_query(client, property_id, dates, metrics=GA4_METRICS['overview'])
         
         if not rows:
             return {}
@@ -246,10 +294,7 @@ class GA4Collector(BaseCollector):
     
     def _get_engagement(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
         """Ottiene metriche di engagement."""
-        rows = self._run_query(
-            client, property_id, dates,
-            metrics=GA4_METRICS['engagement']
-        )
+        rows = self._run_query(client, property_id, dates, metrics=GA4_METRICS['engagement'])
         
         if not rows:
             return {}
@@ -312,3 +357,186 @@ class GA4Collector(BaseCollector):
             })
         
         return {'pages': pages}
+    
+    # ---------------------------------------------------------------------------
+    # METRICHE AVANZATE (SEOZoom-like)
+    # ---------------------------------------------------------------------------
+    
+    def _get_landing_pages(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene le top landing pages con metriche avanzate."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['landing_pages'],
+            dimensions=[GA4_DIMENSIONS['landing_pages']],
+            order_by='screenPageViews',
+            limit=15
+        )
+        
+        landing_pages = []
+        for row in rows:
+            landing_pages.append({
+                'page': row.get('unifiedPagePathScreen', ''),
+                'sessions': safe_int(row.get('sessions', 0)),
+                'users': safe_int(row.get('users', 0)),
+                'engaged_sessions': safe_int(row.get('engagedSessions', 0)),
+                'bounce_rate': safe_float(row.get('bounceRate', 0)),
+                'avg_duration': safe_float(row.get('averageSessionDuration', 0)),
+            })
+        
+        return {'landing_pages': landing_pages}
+    
+    def _get_exit_pages(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene le top exit pages con stima exit."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['exit_pages'],
+            dimensions=[GA4_DIMENSIONS['exit_pages']],
+            order_by='screenPageViews',
+            limit=15
+        )
+        
+        exit_pages = []
+        for row in rows:
+            views = safe_int(row.get('screenPageViews', 0))
+            bounce_rate = safe_float(row.get('bounceRate', 0))
+            
+            # Stima exit (views × bounce rate)
+            estimated_exits = int(views * bounce_rate)
+            
+            exit_pages.append({
+                'page': row.get('unifiedPagePathScreen', ''),
+                'views': views,
+                'sessions': safe_int(row.get('sessions', 0)),
+                'bounce_rate': bounce_rate,
+                'estimated_exits': estimated_exits,
+            })
+        
+        return {'exit_pages': exit_pages}
+    
+    def _get_new_vs_returning(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene distribuzione nuovi vs utenti di ritorno."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['new_vs_returning'],
+            dimensions=[GA4_DIMENSIONS['new_vs_returning']]
+        )
+        
+        new_returning = {}
+        for row in rows:
+            user_type = row.get('newVsReturning', '')
+            sessions = safe_int(row.get('sessions', 0))
+            new_returning[user_type] = sessions
+        
+        return {'new_vs_returning': new_returning}
+    
+    def _get_geo_distribution(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene distribuzione geografica del traffico."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['geo'],
+            dimensions=[GA4_DIMENSIONS['geo']],
+            order_by='sessions',
+            limit=10
+        )
+        
+        geo_data = []
+        for row in rows:
+            geo_data.append({
+                'country': row.get('country', ''),
+                'sessions': safe_int(row.get('sessions', 0))
+            })
+        
+        return {'geo_distribution': geo_data}
+    
+    def _get_traffic_trend(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene trend traffico giornaliero."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['trend'],
+            dimensions=[GA4_DIMENSIONS['trend']],
+            limit=30
+        )
+        
+        trend_data = []
+        for row in rows:
+            trend_data.append({
+                'date': row.get('date', ''),
+                'sessions': safe_int(row.get('sessions', 0))
+            })
+        
+        return {'trend': trend_data}
+    
+    def _get_period_comparison(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Confronta metriche tra periodo attuale e precedente."""
+        try:
+            # Calcola periodo precedente
+            start_date = datetime.strptime(dates['start'], '%Y-%m-%d')
+            end_date = datetime.strptime(dates['end'], '%Y-%m-%d')
+            days_diff = (end_date - start_date).days
+            
+            prev_end = start_date - timedelta(days=1)
+            prev_start = prev_end - timedelta(days=days_diff)
+            
+            # Query periodo attuale
+            current_rows = self._run_query(
+                client, property_id, dates,
+                metrics=GA4_METRICS['comparison']
+            )
+            
+            # Query periodo precedente
+            prev_dates = {
+                'start': prev_start.strftime('%Y-%m-%d'),
+                'end': prev_end.strftime('%Y-%m-%d')
+            }
+            prev_rows = self._run_query(
+                client, property_id, prev_dates,
+                metrics=GA4_METRICS['comparison']
+            )
+            
+            if current_rows and prev_rows:
+                current = current_rows[0]
+                previous = prev_rows[0]
+                
+                current_sessions = safe_int(current.get('sessions', 0))
+                prev_sessions = safe_int(previous.get('sessions', 0))
+                sessions_change = ((current_sessions - prev_sessions) / prev_sessions * 100) if prev_sessions > 0 else 0
+                
+                current_users = safe_int(current.get('totalUsers', 0))
+                prev_users = safe_int(previous.get('totalUsers', 0))
+                users_change = ((current_users - prev_users) / prev_users * 100) if prev_users > 0 else 0
+                
+                return {
+                    'sessions': {
+                        'current': current_sessions,
+                        'previous': prev_sessions,
+                        'change_percent': round(sessions_change, 1)
+                    },
+                    'users': {
+                        'current': current_users,
+                        'previous': prev_users,
+                        'change_percent': round(users_change, 1)
+                    }
+                }
+            
+            return {}
+            
+        except Exception as e:
+            self.logger.warning(f"Errore confronto periodi: {e}")
+            return {}
+    
+    def _get_engaged_sessions(self, client, property_id: str, dates: Dict[str, str]) -> Dict[str, Any]:
+        """Ottiene metriche engaged sessions."""
+        rows = self._run_query(
+            client, property_id, dates,
+            metrics=GA4_METRICS['engaged']
+        )
+        
+        if not rows:
+            return {}
+        
+        row = rows[0]
+        return {
+            'engaged_sessions': safe_int(row.get('engagedSessions', 0)),
+            'engagement_rate': safe_float(row.get('engagementRate', 0)),
+            'avg_session_duration': safe_float(row.get('averageSessionDuration', 0)),
+        }

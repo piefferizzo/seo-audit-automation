@@ -101,7 +101,13 @@ class AuditProcessor:
         if ga4_data:
             audit_rows.extend(self._process_ga4(ga4_data, domain))
 
-        # 4. HTML CRAWLER
+        # 4. GOOGLE ANALYTICS 4
+        ga4_data = raw_data.get("ga4", {})
+        if ga4_data:
+            audit_rows.extend(self._process_ga4(ga4_data, domain))
+            audit_rows.extend(self._process_ga4_advanced(ga4_data, domain))  # ← AGGIUNGI QUESTA RIGA
+
+        # 5. HTML CRAWLER
         html_data = raw_data.get("html", {})
         if html_data:
             audit_rows.extend(self._process_html(html_data, domain, gsc_data=gsc_data, ps_data=ps_data))
@@ -110,28 +116,28 @@ class AuditProcessor:
             audit_rows.extend(self._process_content_advanced(html_data, domain))
             audit_rows.extend(self._process_favicon_and_images(html_data, domain))
 
-        # 5. WHOIS
+        # 6. WHOIS
         whois_data = raw_data.get("whois", {})
         if whois_data:
             audit_rows.extend(self._process_whois(whois_data, domain))
 
-        # 6. SEMRUSH
+        # 7. SEMRUSH
         semrush_data = raw_data.get("semrush", {})
         if semrush_data:
             audit_rows.extend(self._process_semrush(semrush_data, domain))
 
-        # 7. MANUAL DATA
+        # 8. MANUAL DATA
         manual_data = raw_data.get("manual", {})
         if manual_data:
             audit_rows.extend(self._process_manual(manual_data, domain))
 
-        # 8. GENERA CHECKLIST
+        # 9. GENERA CHECKLIST
         checklist_rows = self._generate_checklist(audit_rows)
 
-        # 9. GENERA EXECUTIVE SUMMARY
+        # 10. GENERA EXECUTIVE SUMMARY
         summary = self._generate_summary(domain, audit_rows)
 
-        # 10. ESTRAI DATI DRILL-DOWN
+        # 11. ESTRAI DATI DRILL-DOWN
         drilldown_data = self._extract_drilldown_data(html_data)
 
         return {
@@ -478,7 +484,6 @@ class AuditProcessor:
             ))
 
         return rows
-
     def _process_ga4(self, data: Dict, domain: str) -> List[Dict]:
         """Processa i dati di Google Analytics 4."""
         rows = []
@@ -557,6 +562,122 @@ class AuditProcessor:
 
         return rows
 
+    def _process_ga4_advanced(self, data: Dict, domain: str) -> List[Dict]:
+        """Processa i dati GA4 avanzati (SEOZoom-like)."""
+        rows = []
+        
+        # GA4-06: Top Landing Pages
+        landing_pages = data.get('landing_pages', {})
+        if landing_pages and landing_pages.get('landing_pages'):
+            top_landing = landing_pages['landing_pages'][0]
+            rows.append(make_audit_row(
+                "GA4-06", "Content", "Top Landing Page", "OK", 0,
+                f"{top_landing['page']} ({top_landing['sessions']} sessioni, {top_landing['bounce_rate']*100:.1f}% bounce)",
+                "https://analytics.google.com/"
+            ))
+        
+        # GA4-07: Top Exit Pages
+        exit_pages = data.get('exit_pages', {})
+        if exit_pages and exit_pages.get('exit_pages'):
+            top_exit = exit_pages['exit_pages'][0]
+            rows.append(make_audit_row(
+                "GA4-07", "Content", "Top Exit Page", "OK", 0,
+                f"{top_exit['page']} ({top_exit['estimated_exits']} exit stimati)",
+                "https://analytics.google.com/"
+            ))
+        
+        # GA4-08: Trend Traffico
+        trend = data.get('traffic_trend', {})
+        if trend and trend.get('trend'):
+            trend_data = trend['trend']
+            if len(trend_data) >= 7:
+                recent_sessions = sum(d['sessions'] for d in trend_data[-7:])
+                previous_sessions = sum(d['sessions'] for d in trend_data[-14:-7]) if len(trend_data) >= 14 else 0
+                
+                if previous_sessions > 0:
+                    change = ((recent_sessions - previous_sessions) / previous_sessions) * 100
+                    if change > 10:
+                        stato, sev = "OK", 0
+                        risultato = f"Trend positivo: +{change:.1f}% ultimi 7 giorni"
+                    elif change < -10:
+                        stato, sev = "WARN", 2
+                        risultato = f"Trend negativo: {change:.1f}% ultimi 7 giorni"
+                    else:
+                        stato, sev = "OK", 0
+                        risultato = f"Trend stabile: {change:.1f}% ultimi 7 giorni"
+                    
+                    rows.append(make_audit_row(
+                        "GA4-08", "General", "Trend Traffico Organico", stato, sev,
+                        risultato, "https://analytics.google.com/"
+                    ))
+        
+        # GA4-09: Variazione Sessioni
+        comparison = data.get('period_comparison', {})
+        if comparison and comparison.get('sessions'):
+            sessions_data = comparison['sessions']
+            change = sessions_data.get('change_percent', 0)
+            
+            if change > 10:
+                stato, sev = "OK", 0
+            elif change > 0:
+                stato, sev = "INFO", 0
+            else:
+                stato, sev = "WARN", 2
+            
+            rows.append(make_audit_row(
+                "GA4-09", "General", "Variazione Sessioni (vs periodo precedente)", stato, sev,
+                f"{sessions_data['current']} sessioni ({change:+.1f}%)",
+                "https://analytics.google.com/"
+            ))
+        
+        # GA4-10: Nuovi vs Ritorno
+        new_returning = data.get('new_vs_returning', {})
+        if new_returning and new_returning.get('new_vs_returning'):
+            nr_data = new_returning['new_vs_returning']
+            new_sessions = nr_data.get('new', 0)
+            returning_sessions = nr_data.get('returning', 0)
+            total = new_sessions + returning_sessions
+            
+            if total > 0:
+                new_pct = (new_sessions / total) * 100
+                returning_pct = (returning_sessions / total) * 100
+                
+                rows.append(make_audit_row(
+                    "GA4-10", "Content", "Nuovi vs Utenti di Ritorno", "OK", 0,
+                    f"Nuovi: {new_pct:.1f}%, Ritorno: {returning_pct:.1f}%",
+                    "https://analytics.google.com/"
+                ))
+        
+        # GA4-11: Distribuzione Geografica
+        geo = data.get('geo_distribution', {})
+        if geo and geo.get('geo_distribution'):
+            top_country = geo['geo_distribution'][0]
+            rows.append(make_audit_row(
+                "GA4-11", "Content", "Top Paese per Traffico", "OK", 0,
+                f"{top_country['country']} ({top_country['sessions']} sessioni)",
+                "https://analytics.google.com/"
+            ))
+        
+        # GA4-12: Engaged Sessions
+        engaged = data.get('engaged_sessions', {})
+        if engaged:
+            engaged_sessions = engaged.get('engaged_sessions', 0)
+            engagement_rate = engaged.get('engagement_rate', 0) * 100
+            
+            if engagement_rate > 50:
+                stato, sev = "OK", 0
+            elif engagement_rate > 30:
+                stato, sev = "INFO", 0
+            else:
+                stato, sev = "WARN", 2
+            
+            rows.append(make_audit_row(
+                "GA4-12", "Usability", "Engaged Sessions", stato, sev,
+                f"{engaged_sessions} sessioni engage ({engagement_rate:.1f}%)",
+                "https://analytics.google.com/"
+            ))
+        
+        return rows
     def _process_html(self, data: Dict, domain: str, gsc_data: Dict = None, ps_data: Dict = None) -> List[Dict]:
         """Processa i dati del crawler HTML."""
         rows = []
