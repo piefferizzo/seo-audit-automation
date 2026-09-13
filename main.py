@@ -2,6 +2,7 @@
 """
 SEO Audit Automation Tool
 Main script per eseguire audit SEO completi con multipli collector.
+Usa .env per le credenziali e config.yaml solo per parametri opzionali.
 """
 
 # Carica variabili d'ambiente PRIMA di tutto
@@ -29,6 +30,7 @@ from collectors.html_collector import HTMLCollector
 from collectors.whois_collector import WhoisCollector
 #from collectors.semrush_collector import SemrushCollector
 from collectors.manual_collector import ManualCollector
+from collectors.geo_collector import GEOCollector
 
 # Import processor e generator
 from processors.audit_processor import AuditProcessor
@@ -83,6 +85,7 @@ COLLECTOR_CLASSES = {
     "whois": WhoisCollector,
     #"semrush": SemrushCollector,
     "manual": ManualCollector,
+    "geo": GEOCollector,
 }
 
 
@@ -97,19 +100,19 @@ def normalize_domain(domain: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# HELPER 2 — Caricamento configurazione
+# HELPER 2 — Caricamento configurazione (OPZIONALE)
 # ---------------------------------------------------------------------------
 def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
-    """Carica la configurazione dal file YAML."""
+    """Carica la configurazione dal file YAML se esiste, altrimenti dict vuoto."""
+    if not os.path.exists(config_path):
+        return {}
+    
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"❌ File di configurazione non trovato: {config_path}")
-        sys.exit(1)
+            return yaml.safe_load(f) or {}
     except Exception as e:
-        print(f"❌ Errore nel caricamento della configurazione: {e}")
-        sys.exit(1)
+        print(f"⚠️  Errore nel caricamento di {config_path}: {e}")
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +155,7 @@ def clear_cache(domain: Optional[str] = None):
 # HELPER 5 — Inizializzazione collector
 # ---------------------------------------------------------------------------
 def initialize_collectors(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Inizializza tutti i collector."""
+    """Inizializza tutti i collector con la configurazione."""
     return {
         name: collector_class(config)
         for name, collector_class in COLLECTOR_CLASSES.items()
@@ -254,7 +257,7 @@ def generate_report(processed: Dict[str, Any], domain: str, raw_data: Dict[str, 
     
     try:
         generator = ExcelGenerator()
-        generator.generate(processed, output_file, raw_data)  # ← raw_data passato al generator
+        generator.generate(processed, output_file, raw_data)
         console.print(f"\n[{STYLES['success']}]✅ Completato![/{STYLES['success']}]")
         console.print(f"{ICONS['folder']} Report salvato in: [{STYLES['file_path']}]{output_file}[/{STYLES['file_path']}]")
         return output_file
@@ -330,6 +333,8 @@ def main(domain: Optional[str] = None, clear_cache_flag: bool = False, cache_sta
     # Setup
     console = Console()
     logger = setup_logger("Main")
+    
+    # Carica configurazione (OPZIONALE - se non esiste, usa dict vuoto)
     config = load_config()
     
     # Header
@@ -341,7 +346,7 @@ def main(domain: Optional[str] = None, clear_cache_flag: bool = False, cache_sta
     console.print(f"\n[{STYLES['phase']}]{ICONS['package']} Fase 1: Raccolta dati[/{STYLES['phase']}]")
     
     collectors = initialize_collectors(config)
-    raw_data = collect_all_data(collectors, domain, console, logger)  # ← raw_data definito qui
+    raw_data = collect_all_data(collectors, domain, console, logger)
     
     # Verifica dati raccolti
     display_data_verification(collectors, raw_data, console)
@@ -358,7 +363,6 @@ def main(domain: Optional[str] = None, clear_cache_flag: bool = False, cache_sta
     # ============================================
     console.print(f"\n[{STYLES['phase']}]{ICONS['chart']} Fase 3: Generazione report[/{STYLES['phase']}]")
     
-    # ← raw_data passato a generate_report
     generate_report(processed, domain, raw_data, console, logger)
     
     # Statistiche cache finali
@@ -379,6 +383,10 @@ Esempi:
   python main.py --cache-stats                    # Mostra statistiche cache
   python main.py --clear-cache                    # Cancella tutta la cache
   python main.py --clear-cache https://example.com # Cancella cache per dominio
+
+Configurazione:
+  - Le credenziali API vanno nel file .env
+  - config.yaml è opzionale (solo per parametri avanzati)
             """
         )
         

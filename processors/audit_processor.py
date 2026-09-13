@@ -78,11 +78,12 @@ class AuditProcessor:
 
     def process(self, domain: str, raw_data: Dict[str, Any]) -> Dict[str, List[Dict]]:
         """Elabora tutti i dati grezzi e genera audit + checklist."""
-
         self.logger.debug(f"  🔍 DEBUG - Dati ricevuti nel processore:")
         self.logger.debug(f"    - pagespeed: {bool(raw_data.get('pagespeed'))}")
         self.logger.debug(f"    - gsc: {bool(raw_data.get('gsc'))}")
+        self.logger.debug(f"    - ga4: {bool(raw_data.get('ga4'))}")
         self.logger.debug(f"    - html: {bool(raw_data.get('html'))}")
+        self.logger.debug(f"    - geo: {bool(raw_data.get('geo'))}")
 
         audit_rows = []
 
@@ -96,18 +97,13 @@ class AuditProcessor:
         if gsc_data:
             audit_rows.extend(self._process_gsc(gsc_data, domain))
 
-        # 3. GOOGLE ANALYTICS 4
+        # 3. GOOGLE ANALYTICS 4 (base + avanzati)
         ga4_data = raw_data.get("ga4", {})
         if ga4_data:
             audit_rows.extend(self._process_ga4(ga4_data, domain))
+            audit_rows.extend(self._process_ga4_advanced(ga4_data, domain))
 
-        # 4. GOOGLE ANALYTICS 4
-        ga4_data = raw_data.get("ga4", {})
-        if ga4_data:
-            audit_rows.extend(self._process_ga4(ga4_data, domain))
-            audit_rows.extend(self._process_ga4_advanced(ga4_data, domain))  # ← AGGIUNGI QUESTA RIGA
-
-        # 5. HTML CRAWLER
+        # 4. HTML CRAWLER
         html_data = raw_data.get("html", {})
         if html_data:
             audit_rows.extend(self._process_html(html_data, domain, gsc_data=gsc_data, ps_data=ps_data))
@@ -116,20 +112,25 @@ class AuditProcessor:
             audit_rows.extend(self._process_content_advanced(html_data, domain))
             audit_rows.extend(self._process_favicon_and_images(html_data, domain))
 
-        # 6. WHOIS
+        # 5. WHOIS
         whois_data = raw_data.get("whois", {})
         if whois_data:
             audit_rows.extend(self._process_whois(whois_data, domain))
 
-        # 7. SEMRUSH
+        # 6. SEMRUSH
         semrush_data = raw_data.get("semrush", {})
         if semrush_data:
             audit_rows.extend(self._process_semrush(semrush_data, domain))
 
-        # 8. MANUAL DATA
+        # 7. MANUAL DATA
         manual_data = raw_data.get("manual", {})
         if manual_data:
             audit_rows.extend(self._process_manual(manual_data, domain))
+
+        # 8. GEO/AEO DATA ← AGGIUNTO!
+        geo_data = raw_data.get("geo", {})
+        if geo_data:
+            audit_rows.extend(self._process_geo(geo_data, domain))
 
         # 9. GENERA CHECKLIST
         checklist_rows = self._generate_checklist(audit_rows)
@@ -146,7 +147,6 @@ class AuditProcessor:
             "summary": summary,
             "drilldown": drilldown_data
         }
-
     def _extract_drilldown_data(self, html_data: Dict) -> Dict[str, List[Dict]]:
         """Estrae i dati drill-down dal crawler HTML, includendo anche la homepage."""
         drilldown = html_data.get('drilldown', {}) if html_data else {}
@@ -678,6 +678,7 @@ class AuditProcessor:
             ))
         
         return rows
+
     def _process_html(self, data: Dict, domain: str, gsc_data: Dict = None, ps_data: Dict = None) -> List[Dict]:
         """Processa i dati del crawler HTML."""
         rows = []
@@ -1525,6 +1526,97 @@ class AuditProcessor:
 
         return rows
 
+    def _process_geo(self, data: Dict, domain: str) -> List[Dict]:
+        """Processa i dati GEO/AEO."""
+        rows = []
+        
+        # GEO-01: Schema Markup Validation
+        schema_validation = data.get('schema_validation', {})
+        if schema_validation:
+            completeness = schema_validation.get('completeness_score', 0)
+            total_schemas = schema_validation.get('total_schemas', 0)
+            
+            if completeness >= 70:
+                stato, sev = "OK", 0
+            elif completeness >= 40:
+                stato, sev = "WARN", 2
+            else:
+                stato, sev = "FAIL", 1
+            
+            rows.append(make_audit_row(
+                "GEO-01", "GEO", "Schema Markup Completeness", stato, sev,
+                f"{completeness}% completo ({total_schemas} schemi trovati)",
+                domain,
+                "Implementare JSON-LD per Organization, Article, FAQPage" if completeness < 70 else ""
+            ))
+        
+        # GEO-02: AI Readability Score
+        ai_readability = data.get('ai_readability', {})
+        if ai_readability:
+            score = ai_readability.get('readability_score', 0)
+            
+            if score >= 70:
+                stato, sev = "OK", 0
+            elif score >= 40:
+                stato, sev = "WARN", 2
+            else:
+                stato, sev = "FAIL", 1
+            
+            rows.append(make_audit_row(
+                "GEO-02", "GEO", "AI Readability Score", stato, sev,
+                f"{score}/100 (Direct answer: {'✓' if ai_readability.get('has_direct_answer') else '✗'}, "
+                f"FAQ: {'✓' if ai_readability.get('has_faq_format') else '✗'}, "
+                f"List: {'✓' if ai_readability.get('has_list_format') else '✗'})",
+                domain,
+                "Migliorare struttura per AI Overviews e featured snippets" if score < 70 else ""
+            ))
+        
+        # GEO-03: Citation Potential
+        citation = data.get('citation_potential', {})
+        if citation:
+            score = citation.get('citation_score', 0)
+            
+            if score >= 70:
+                stato, sev = "OK", 0
+            elif score >= 40:
+                stato, sev = "WARN", 2
+            else:
+                stato, sev = "FAIL", 1
+            
+            factors = citation.get('factors', {})
+            rows.append(make_audit_row(
+                "GEO-03", "GEO", "Citation Potential", stato, sev,
+                f"{score}/100 (Structured data: {factors.get('structured_data', 0)}/30, "
+                f"Authority: {factors.get('authority', 0)}/25, "
+                f"Clarity: {factors.get('clarity', 0)}/25, "
+                f"Originality: {factors.get('originality', 0)}/20)",
+                domain,
+                "Migliorare autorevolezza e unicità del contenuto" if score < 70 else ""
+            ))
+        
+        # GEO-04: Content Structure
+        structure = data.get('content_structure', {})
+        if structure:
+            h1_count = structure.get('h1_count', 0)
+            h2_count = structure.get('h2_count', 0)
+            
+            if h1_count == 1 and h2_count >= 3:
+                stato, sev = "OK", 0
+            elif h1_count >= 1 and h2_count >= 2:
+                stato, sev = "WARN", 2
+            else:
+                stato, sev = "FAIL", 1
+            
+            rows.append(make_audit_row(
+                "GEO-04", "GEO", "Content Structure for GEO", stato, sev,
+                f"H1: {h1_count}, H2: {h2_count}, H3: {structure.get('h3_count', 0)}, "
+                f"Paragrafi: {structure.get('paragraphs_count', 0)}",
+                domain,
+                "Ottimizzare struttura headings per motori AI" if stato != "OK" else ""
+            ))
+        
+        return rows
+
     # ------------------------------------------------------------------
     # CHECKLIST — tabella dichiarativa invece di ~35 tuple con lambda
     # ------------------------------------------------------------------
@@ -1618,6 +1710,7 @@ class AuditProcessor:
 
         return checklist
 
+
     def _generate_summary(self, domain: str, audit_rows: List[Dict]) -> Dict:
         """Genera l'Executive Summary."""
         total = len(audit_rows)
@@ -1635,16 +1728,32 @@ class AuditProcessor:
             weighted_score = (oks * 1.0 + warns * 0.5 + fails * 0.0) / relevant_checks
             health_score = round(weighted_score * 100)
 
-        top_criticita = sorted(
+        # Top criticità - evita duplicati per elemento
+        seen_crit = set()
+        top_criticita = []
+        for r in sorted(
             [r for r in audit_rows if r["Stato"] == "FAIL"],
             key=lambda x: x.get("Severità", 0),
             reverse=True
-        )[:3]
+        ):
+            element = r.get("Elemento Analizzato", "")
+            if element not in seen_crit:
+                seen_crit.add(element)
+                top_criticita.append(r)
+                if len(top_criticita) >= 3:
+                    break
 
-        top_punti_forza = sorted(
-            [r for r in audit_rows if r["Stato"] == "OK"],
-            key=lambda x: x.get("Categoria", "")
-        )[:3]
+        # Top punti di forza - evita duplicati per elemento
+        seen_pf = set()
+        top_punti_forza = []
+        for r in audit_rows:
+            if r["Stato"] == "OK":
+                element = r.get("Elemento Analizzato", "")
+                if element not in seen_pf:
+                    seen_pf.add(element)
+                    top_punti_forza.append(r)
+                    if len(top_punti_forza) >= 3:
+                        break
 
         return {
             "domain": domain,

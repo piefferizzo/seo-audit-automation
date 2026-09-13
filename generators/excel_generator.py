@@ -34,7 +34,10 @@ SECTION_FONT = Font(bold=True, size=12)
 COLUMN_WIDTHS = {
     "AUDIT": [10, 12, 30, 8, 10, 50, 40, 40],
     "Checklist": [5, 15, 30, 12, 50, 50, 15, 8, 40, 30],
-    "drilldown": [60, 60, 60, 60],  # URL, content, problem, extra
+    "drilldown": [60, 60, 60, 60],
+    "GA4_Landing": [40, 12, 12, 12, 12, 15, 12],
+    "GA4_Exit": [40, 15, 12, 12, 12],
+    "GA4_Geo": [40, 15],
 }
 
 
@@ -48,9 +51,8 @@ def create_drilldown_dataframe(
 ) -> pd.DataFrame:
     """Crea un DataFrame per fogli drill-down, gestendo il caso vuoto."""
     if not data:
-        # Crea riga "N/A" con tutte le colonne
         na_row = {col: "N/A" for col in columns}
-        na_row[columns[-1]] = empty_message  # Ultima colonna = messaggio
+        na_row[columns[-1]] = empty_message
         return pd.DataFrame([na_row], columns=columns)
     
     return pd.DataFrame(data, columns=columns)
@@ -168,7 +170,6 @@ class ExcelGenerator:
     """Genera il report Excel dell'audit SEO nel formato target."""
     
     def __init__(self):
-        # Usa le costanti di modulo
         self.state_colors = STATE_COLORS
         self.priority_colors = PRIORITY_COLORS
     
@@ -180,7 +181,6 @@ class ExcelGenerator:
         checklist_rows = processed_data['checklist']
         drilldown = processed_data.get('drilldown', {})
         
-        # Se raw_data non è passato, usa dict vuoto
         if raw_data is None:
             raw_data = {}
         
@@ -194,7 +194,7 @@ class ExcelGenerator:
             # 3. Checklist principale
             self._write_checklist(writer, checklist_rows, audit_rows)
             
-            # 4. Fogli drill-down (usano helper generico)
+            # 4. Fogli drill-down
             self._write_drilldown_sheet(
                 writer, 'HTML - IMG', drilldown, 'images',
                 columns=['URl', 'problem'],
@@ -231,7 +231,7 @@ class ExcelGenerator:
         
         # Formatta il file
         self._format_excel(output_path)
-        
+    
     def _write_drilldown_sheet(
         self,
         writer,
@@ -246,12 +246,68 @@ class ExcelGenerator:
         df = create_drilldown_dataframe(data, columns)
         df.to_excel(writer, sheet_name=sheet_name, index=False)
     
+    def _write_ga4_landing_pages(self, writer, ga4_data: Dict):
+        """Scrive il foglio GA4 Landing Pages."""
+        landing_pages = ga4_data.get('landing_pages', {}).get('landing_pages', [])
+        
+        if not landing_pages:
+            rows = [{'Pagina': 'N/A', 'Sessioni': 'N/A', 'Utenti': 'N/A', 'Engaged': 'N/A', 'Bounce': 'N/A', 'Durata': 'N/A', 'Conv.': 'N/A'}]
+        else:
+            rows = []
+            for lp in landing_pages[:15]:
+                rows.append({
+                    'Pagina': lp.get('page', ''),
+                    'Sessioni': lp.get('sessions', 0),
+                    'Utenti': lp.get('users', 0),
+                    'Engaged': lp.get('engaged_sessions', 0),
+                    'Bounce': f"{lp.get('bounce_rate', 0)*100:.1f}%",
+                    'Durata': f"{lp.get('avg_duration', 0)/60:.1f}m",
+                    'Conv.': lp.get('conversions', 0)
+                })
+        
+        df = pd.DataFrame(rows)
+        df.to_excel(writer, sheet_name='GA4 Landing Pages', index=False)
+    
+    def _write_ga4_exit_pages(self, writer, ga4_data: Dict):
+        """Scrive il foglio GA4 Exit Pages."""
+        exit_pages = ga4_data.get('exit_pages', {}).get('exit_pages', [])
+        
+        if not exit_pages:
+            rows = [{'Pagina': 'N/A', 'Exits (stima)': 'N/A', 'Views': 'N/A', 'Sessioni': 'N/A', 'Bounce': 'N/A'}]
+        else:
+            rows = []
+            for ep in exit_pages[:15]:
+                rows.append({
+                    'Pagina': ep.get('page', ''),
+                    'Exits (stima)': ep.get('estimated_exits', 0),
+                    'Views': ep.get('views', 0),
+                    'Sessioni': ep.get('sessions', 0),
+                    'Bounce': f"{ep.get('bounce_rate', 0)*100:.1f}%"
+                })
+        
+        df = pd.DataFrame(rows)
+        df.to_excel(writer, sheet_name='GA4 Exit Pages', index=False)
+    
+    def _write_ga4_geo(self, writer, ga4_data: Dict):
+        """Scrive il foglio GA4 Geo Distribution."""
+        geo_data = ga4_data.get('geo_distribution', {}).get('geo_distribution', [])
+        
+        if not geo_data:
+            rows = [{'Paese': 'N/A', 'Sessioni': 'N/A'}]
+        else:
+            rows = []
+            for geo in geo_data[:10]:
+                rows.append({
+                    'Paese': geo.get('country', ''),
+                    'Sessioni': geo.get('sessions', 0)
+                })
+        
+        df = pd.DataFrame(rows)
+        df.to_excel(writer, sheet_name='GA4 Geo', index=False)
+    
     def _write_summary(self, writer, summary: Dict, audit_rows: List[Dict]):
         """Scrive il foglio Executive Summary."""
-        # Raggruppa per categoria
         by_category = self._group_by_category(audit_rows)
-        
-        # Costruisci righe
         rows = self._build_summary_rows(summary, by_category)
         
         df = pd.DataFrame(rows, columns=["Metrica", "Dettaglio"])
@@ -289,8 +345,7 @@ class ExcelGenerator:
             ["TOP 3 CRITICITÀ", ""],
         ]
         
-        # Top criticità
-        top_criticità = summary.get('top_criticità', [])[:3]
+        top_criticità = summary.get('top_criticita', [])[:3]
         if top_criticità:
             for i, crit in enumerate(top_criticità, 1):
                 rows.append([f"{i}.", f"{crit['Elemento Analizzato']}: {crit['Risultato / Evidenza']}"])
@@ -302,7 +357,6 @@ class ExcelGenerator:
             ["TOP PUNTI DI FORZA", ""],
         ])
         
-        # Top punti di forza
         for i, pf in enumerate(summary.get('top_punti_forza', [])[:3], 1):
             rows.append([f"{i}.", pf['Elemento Analizzato']])
         
@@ -312,7 +366,6 @@ class ExcelGenerator:
             ["Categoria", "OK / WARN / FAIL / INFO / N/A"],
         ])
         
-        # Ripartizione per categoria
         for cat, counts in sorted(by_category.items()):
             stats = f"{counts['OK']} / {counts['WARN']} / {counts['FAIL']} / {counts['INFO']} / {counts['N/A']}"
             rows.append([cat, stats])
@@ -326,7 +379,6 @@ class ExcelGenerator:
             "Risultato / Evidenza", "URL / Link Evidenza", "Note Tecniche"
         ]
         
-        # Filtra solo le colonne esistenti
         available_columns = [c for c in columns if c in audit_rows[0]] if audit_rows else columns
         df = pd.DataFrame(audit_rows, columns=available_columns)
         df.to_excel(writer, sheet_name="AUDIT", index=False)
@@ -369,7 +421,6 @@ class ExcelGenerator:
         """Applica la formattazione al file Excel."""
         wb = load_workbook(file_path)
         
-        # Formattazione specifica per ogni tipo di foglio
         formatters = {
             "Executive Summary": self._format_summary_sheet,
             "AUDIT": self._format_audit_sheet,
@@ -378,9 +429,9 @@ class ExcelGenerator:
             "Title": self._format_drilldown_sheet,
             "Description": self._format_drilldown_sheet,
             "HTML - HEADINGS": self._format_drilldown_sheet,
-            "GA4 Landing Pages": self._format_drilldown_sheet,
-            "GA4 Exit Pages": self._format_drilldown_sheet,
-            "GA4 Geo": self._format_drilldown_sheet,
+            "GA4 Landing Pages": self._format_ga4_landing_sheet,
+            "GA4 Exit Pages": self._format_ga4_exit_sheet,
+            "GA4 Geo": self._format_ga4_geo_sheet,
             "Consigli generali": self._format_consigli_sheet,
         }
         
@@ -395,10 +446,8 @@ class ExcelGenerator:
         worksheet.column_dimensions['A'].width = 30
         worksheet.column_dimensions['B'].width = 60
         
-        # Health Score evidenziato
         worksheet['B7'].font = Font(bold=True, size=16, color="0000FF")
         
-        # Sezioni evidenziate
         section_titles = [
             "DATI CLIENTE", "HEALTH SCORE", "STATISTICHE",
             "TOP 3 CRITICITÀ", "TOP PUNTI DI FORZA",
@@ -415,13 +464,13 @@ class ExcelGenerator:
         """Formatta il foglio AUDIT."""
         set_column_widths(worksheet, COLUMN_WIDTHS["AUDIT"])
         apply_header_format(worksheet)
-        apply_state_colors(worksheet, column_index=4)  # Colonna "Stato"
+        apply_state_colors(worksheet, column_index=4)
     
     def _format_checklist_sheet(self, worksheet):
         """Formatta il foglio Checklist."""
         set_column_widths(worksheet, COLUMN_WIDTHS["Checklist"])
         apply_header_format(worksheet)
-        apply_priority_colors(worksheet, column_index=4)  # Colonna "Priority"
+        apply_priority_colors(worksheet, column_index=4)
         apply_wrap_text(worksheet)
     
     def _format_drilldown_sheet(self, worksheet):
@@ -430,66 +479,25 @@ class ExcelGenerator:
         auto_adjust_columns(worksheet)
         apply_wrap_text(worksheet)
     
-    def _format_consigli_sheet(self, worksheet):
+    def _format_ga4_landing_sheet(self, worksheet):
+        """Formatta il foglio GA4 Landing Pages."""
+        set_column_widths(worksheet, COLUMN_WIDTHS["GA4_Landing"])
+        apply_header_format(worksheet)
+        apply_wrap_text(worksheet)
     
+    def _format_ga4_exit_sheet(self, worksheet):
+        """Formatta il foglio GA4 Exit Pages."""
+        set_column_widths(worksheet, COLUMN_WIDTHS["GA4_Exit"])
+        apply_header_format(worksheet)
+        apply_wrap_text(worksheet)
+    
+    def _format_ga4_geo_sheet(self, worksheet):
+        """Formatta il foglio GA4 Geo."""
+        set_column_widths(worksheet, COLUMN_WIDTHS["GA4_Geo"])
+        apply_header_format(worksheet)
+        apply_wrap_text(worksheet)
+    
+    def _format_consigli_sheet(self, worksheet):
         """Formatta il foglio Consigli generali."""
         worksheet.column_dimensions['A'].width = 100
         apply_header_format(worksheet)
-
-    def _write_ga4_landing_pages(self, writer, ga4_data: Dict):
-        """Scrive il foglio GA4 Landing Pages."""
-        landing_pages = ga4_data.get('landing_pages', {}).get('landing_pages', [])
-        
-        if not landing_pages:
-            rows = [{'Pagina': 'N/A', 'Sessioni': 'N/A', 'Utenti': 'N/A', 'Engaged': 'N/A', 'Bounce': 'N/A', 'Durata': 'N/A'}]
-        else:
-            rows = []
-            for lp in landing_pages[:15]:
-                rows.append({
-                    'Pagina': lp.get('page', ''),
-                    'Sessioni': lp.get('sessions', 0),
-                    'Utenti': lp.get('users', 0),
-                    'Engaged': lp.get('engaged_sessions', 0),
-                    'Bounce': f"{lp.get('bounce_rate', 0)*100:.1f}%",
-                    'Durata': f"{lp.get('avg_duration', 0)/60:.1f}m"
-                })
-        
-        df = pd.DataFrame(rows)
-        df.to_excel(writer, sheet_name='GA4 Landing Pages', index=False)
-    
-    def _write_ga4_exit_pages(self, writer, ga4_data: Dict):
-        """Scrive il foglio GA4 Exit Pages."""
-        exit_pages = ga4_data.get('exit_pages', {}).get('exit_pages', [])
-        
-        if not exit_pages:
-            rows = [{'Pagina': 'N/A', 'Exits (stima)': 'N/A', 'Views': 'N/A', 'Sessioni': 'N/A', 'Bounce': 'N/A'}]
-        else:
-            rows = []
-            for ep in exit_pages[:15]:
-                rows.append({
-                    'Pagina': ep.get('page', ''),
-                    'Exits (stima)': ep.get('estimated_exits', 0),
-                    'Views': ep.get('views', 0),
-                    'Sessioni': ep.get('sessions', 0),
-                    'Bounce': f"{ep.get('bounce_rate', 0)*100:.1f}%"
-                })
-        
-        df = pd.DataFrame(rows)
-        df.to_excel(writer, sheet_name='GA4 Exit Pages', index=False)
-    
-    def _write_ga4_geo(self, writer, ga4_data: Dict):
-        """Scrive il foglio GA4 Geo Distribution."""
-        geo_data = ga4_data.get('geo_distribution', {}).get('geo_distribution', [])
-        
-        if not geo_data:
-            rows = [{'Paese': 'N/A', 'Sessioni': 'N/A'}]
-        else:
-            rows = []
-            for geo in geo_data[:10]:
-                rows.append({
-                    'Paese': geo.get('country', ''),
-                    'Sessioni': geo.get('sessions', 0)
-                })
-        
-        df = pd.DataFrame(rows)
-        df.to_excel(writer, sheet_name='GA4 Geo', index=False)

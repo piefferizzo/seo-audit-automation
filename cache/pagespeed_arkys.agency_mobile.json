@@ -1,15 +1,15 @@
 {
   "url": "https://arkys.agency",
   "strategy": "mobile",
-  "timestamp": "2026-09-11T15:34:20.448391",
+  "timestamp": "2026-09-12T19:18:06.725537",
   "data": {
-    "performance_score": 74.0,
+    "performance_score": 77.0,
     "accessibility_score": 81.0,
-    "lcp": 5.408,
-    "fcp": 1.089,
-    "cls": 0.05298544918448732,
-    "tti": 5.408600000000001,
+    "lcp": 5.409,
+    "fcp": 1.095,
+    "cls": 0.05458374111965521,
+    "tti": 5.409,
     "tbt": 0.0,
-    "si": 5.862944253316499
+    "si": 4.128752069014803
   }
 }

@@ -10,70 +10,18 @@ from collectors.base_collector import BaseCollector
 
 
 # ---------------------------------------------------------------------------
-# HELPER 1 — Tentativi multipli con user-agent (elimina duplicazione)
+# COSTANTI — Configurazione crawler
 # ---------------------------------------------------------------------------
-USER_AGENTS = [
-    {
-        'name': 'standard',
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        }
-    },
-    {
-        'name': 'googlebot',
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-        }
-    },
-    {
-        'name': 'browser',
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-        }
-    }
-]
+DEFAULT_TIMEOUT = 30
+MAX_RETRIES = 2
+DEFAULT_MAX_PAGES = 50
 
+# User-agent per crawling
+USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-def retry_with_user_agents(
-    url: str,
-    session: requests.Session,
-    timeout: int = 15,
-    logger: Optional[Any] = None
-) -> Tuple[bool, Optional[str]]:
-    """Tenta di scaricare una URL con multiple user-agent.
-    
-    Returns:
-        (success, content) - content è None se tutti i tentativi falliscono
-    """
-    for ua_config in USER_AGENTS:
-        try:
-            if logger:
-                logger.debug(f"    📥 Download ({ua_config['name']}): {url}")
-            
-            response = session.get(url, headers=ua_config['headers'], timeout=timeout)
-            
-            if response.status_code == 200:
-                return True, response.text
-            else:
-                if logger:
-                    logger.debug(f"    ⚠️  Status code: {response.status_code}")
-        except Exception as e:
-            if logger:
-                logger.warning(f"    ⚠️  Errore {ua_config['name']}: {e}")
-    
-    return False, None
-
-
-# ---------------------------------------------------------------------------
-# HELPER 2 — Pattern di skip per immagini (centralizza filtraggio)
-# ---------------------------------------------------------------------------
+# Pattern di skip per immagini (filtro anti-rumore)
 IMAGE_SKIP_PATTERNS = [
-    # Data URI (SVG inline, base64)
     r'^data:',
-    # Tracking pixel
     r'linkedin\.com/collect',
     r'facebook\.com/tr',
     r'google-analytics\.com',
@@ -81,58 +29,32 @@ IMAGE_SKIP_PATTERNS = [
     r'px\.ads\.linkedin\.com',
     r'connect\.facebook\.net',
     r'analytics\.google\.com',
-    # Gravatar (avatar WordPress)
     r'secure\.gravatar\.com',
     r'www\.gravatar\.com',
-    # URL con typo evidenti
     r'^https?://0[a-z]',
-    # Pixel di monitoraggio comuni
     r'pixel\.',
     r'tracking\.',
     r'beacon\.',
-    # Placeholder images
     r'placeholder\.',
     r'dummyimage\.com',
     r'via\.placeholder',
 ]
 
 
+# ---------------------------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------------------------
 def should_skip_image(url: str) -> bool:
     """Verifica se un'immagine deve essere skippata."""
     return any(re.search(p, url, re.IGNORECASE) for p in IMAGE_SKIP_PATTERNS)
 
 
-# ---------------------------------------------------------------------------
-# HELPER 3 — Analisi elementi HTML con validazione
-# ---------------------------------------------------------------------------
-def analyze_html_element(
-    element: Any,
-    checks: List[Tuple[str, Callable[[Any], bool], str]],
-    url: str,
-    element_type: str
-) -> List[Dict[str, Any]]:
-    """Analizza un elemento HTML con multiple check.
-    
-    Args:
-        element: Elemento BeautifulSoup da analizzare
-        checks: Lista di (check_name, check_function, error_message)
-        url: URL della pagina
-        element_type: Tipo elemento (title, description, etc.)
-    
-    Returns:
-        Lista di problemi trovati
-    """
-    problems = []
-    
-    for check_name, check_fn, error_msg in checks:
-        if not check_fn(element):
-            problems.append({
-                'url': url,
-                'element_type': element_type,
-                'problem': error_msg
-            })
-    
-    return problems
+def estimate_pixel_width(text: str, is_title: bool = True) -> int:
+    """Stima la larghezza in pixel di un testo nelle SERP Google."""
+    if not text:
+        return 0
+    px_per_char = 8.5 if is_title else 6.8
+    return int(len(text) * px_per_char)
 
 
 class HTMLCollector(BaseCollector):
@@ -140,12 +62,12 @@ class HTMLCollector(BaseCollector):
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.timeout = 30
-        self.max_retries = 2
-        self.max_pages = config.get("MAX_PAGES_TO_CRAWL", 50)
+        self.timeout = config.get('CRAWLER_TIMEOUT', DEFAULT_TIMEOUT)
+        self.max_retries = MAX_RETRIES
+        self.max_pages = config.get("MAX_PAGES_TO_CRAWL", DEFAULT_MAX_PAGES)
         
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': USER_AGENT,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate',
@@ -164,6 +86,7 @@ class HTMLCollector(BaseCollector):
         return True
     
     def _check_playwright(self) -> bool:
+        """Verifica se Playwright è disponibile."""
         try:
             import playwright
             return True
@@ -171,6 +94,7 @@ class HTMLCollector(BaseCollector):
             return False
     
     def _init_playwright(self):
+        """Inizializza Playwright."""
         if not self.playwright_available:
             return False
         try:
@@ -178,7 +102,7 @@ class HTMLCollector(BaseCollector):
             self.playwright_p = sync_playwright().start()
             self.playwright_browser = self.playwright_p.chromium.launch(headless=True)
             self.playwright_context = self.playwright_browser.new_context(
-                user_agent=self.headers['User-Agent'],
+                user_agent=USER_AGENT,
                 viewport={'width': 1920, 'height': 1080}
             )
             return True
@@ -187,6 +111,7 @@ class HTMLCollector(BaseCollector):
             return False
     
     def _close_playwright(self):
+        """Chiude Playwright."""
         try:
             if self.playwright_browser:
                 self.playwright_browser.close()
@@ -356,6 +281,14 @@ class HTMLCollector(BaseCollector):
     
     def _extract_page_data(self, soup: BeautifulSoup, url: str, final_url: str, headers: Dict) -> Dict[str, Any]:
         """Estrae tutti i dati dalla pagina."""
+        # Estrai CSS e JS PRIMA di decomporre gli elementi
+        css_files = self._get_css_files(soup, url)
+        js_files = self._get_js_files(soup, url)
+        
+        self.logger.debug(f"  🔍 Pagina: {url}")
+        self.logger.debug(f"    - CSS: {len(css_files)} file")
+        self.logger.debug(f"    - JS: {len(js_files)} file")
+        
         content_soup = BeautifulSoup(str(soup), 'html.parser')
         for elem in content_soup(['script', 'style', 'nav', 'footer', 'header']):
             elem.decompose()
@@ -383,8 +316,8 @@ class HTMLCollector(BaseCollector):
             'word_count': self._get_word_count(soup),
             'breadcrumbs': self._find_breadcrumbs(soup),
             'logo': self._find_logo(soup, url),
-            'css_files': self._get_css_files(soup, url),
-            'js_files': self._get_js_files(soup, url),
+            'css_files': css_files,
+            'js_files': js_files,
             'favicon_links': self._get_favicon_links(soup, url),
             'content_text': content_text,
         }
@@ -507,32 +440,109 @@ class HTMLCollector(BaseCollector):
         return {'found': False}
     
     def _get_css_files(self, soup, base_url):
-        """Rileva file CSS con metodi multipli."""
+        """Rileva file CSS con metodi multipli e robusti."""
         css_files = []
         
         # Metodo 1: tag <link rel="stylesheet">
         for link in soup.find_all('link', rel='stylesheet'):
             href = link.get('href')
             if href:
-                css_files.append(urljoin(base_url, href))
+                full_url = urljoin(base_url, href)
+                if full_url not in css_files:
+                    css_files.append(full_url)
         
         # Metodo 2: tag <link> con type="text/css"
         for link in soup.find_all('link', type='text/css'):
             href = link.get('href')
-            if href and href not in css_files:
-                css_files.append(urljoin(base_url, href))
+            if href:
+                full_url = urljoin(base_url, href)
+                if full_url not in css_files:
+                    css_files.append(full_url)
+        
+        # Metodo 3: tag <link> con rel contenente "stylesheet" (case-insensitive)
+        for link in soup.find_all('link'):
+            rel = link.get('rel', [])
+            if isinstance(rel, list):
+                rel_str = ' '.join(rel).lower()
+            else:
+                rel_str = str(rel).lower()
+            
+            if 'stylesheet' in rel_str:
+                href = link.get('href')
+                if href:
+                    full_url = urljoin(base_url, href)
+                    if full_url not in css_files:
+                        css_files.append(full_url)
+        
+        # Metodo 4: tag <style> con src (raro ma possibile)
+        for style in soup.find_all('style', src=True):
+            src = style.get('src')
+            if src:
+                full_url = urljoin(base_url, src)
+                if full_url not in css_files:
+                    css_files.append(full_url)
+        
+        # Metodo 5: Cerca nei tag <link> senza rel specifico ma con href che finisce con .css
+        for link in soup.find_all('link'):
+            href = link.get('href', '')
+            if href and href.lower().endswith('.css'):
+                full_url = urljoin(base_url, href)
+                if full_url not in css_files:
+                    css_files.append(full_url)
+        
+        self.logger.debug(f"  🎨 CSS files trovati: {len(css_files)}")
+        if css_files:
+            self.logger.debug(f"    Prime 3: {css_files[:3]}")
         
         return css_files
     
     def _get_js_files(self, soup, base_url):
-        """Rileva file JavaScript con metodi multipli."""
+        """Rileva file JavaScript con metodi multipli e robusti."""
         js_files = []
         
         # Metodo 1: tag <script src="...">
         for script in soup.find_all('script', src=True):
             src = script.get('src')
             if src:
-                js_files.append(urljoin(base_url, src))
+                full_url = urljoin(base_url, src)
+                if full_url not in js_files:
+                    js_files.append(full_url)
+        
+        # Metodo 2: tag <script type="text/javascript"> con src
+        for script in soup.find_all('script', type='text/javascript'):
+            src = script.get('src')
+            if src:
+                full_url = urljoin(base_url, src)
+                if full_url not in js_files:
+                    js_files.append(full_url)
+        
+        # Metodo 3: tag <script type="module"> con src
+        for script in soup.find_all('script', type='module'):
+            src = script.get('src')
+            if src:
+                full_url = urljoin(base_url, src)
+                if full_url not in js_files:
+                    js_files.append(full_url)
+        
+        # Metodo 4: tag <script> con src che finisce con .js
+        for script in soup.find_all('script'):
+            src = script.get('src', '')
+            if src and src.lower().endswith('.js'):
+                full_url = urljoin(base_url, src)
+                if full_url not in js_files:
+                    js_files.append(full_url)
+        
+        # Metodo 5: Cerca anche script con type="application/javascript"
+        for script in soup.find_all('script', type='application/javascript'):
+            src = script.get('src')
+            if src:
+                full_url = urljoin(base_url, src)
+                if full_url not in js_files:
+                    js_files.append(full_url)
+        
+        self.logger.debug(f"  📜 JS files trovati: {len(js_files)}")
+        if js_files:
+            self.logger.debug(f"    Prime 3: {js_files[:3]}")
         
         return js_files
     
@@ -557,42 +567,40 @@ class HTMLCollector(BaseCollector):
     # ============================================
     
     def _check_robots(self, domain):
-        """Verifica robots.txt con tentativi multipli."""
-        success, content = retry_with_user_agents(
-            f"{domain}/robots.txt",
-            self.session,
-            timeout=10,
-            logger=self.logger
-        )
-        
-        if not success or not content:
-            self.logger.warning(f"  ⚠️  robots.txt non accessibile")
+        """Verifica robots.txt."""
+        try:
+            response = self.session.get(f"{domain}/robots.txt", timeout=10)
+            content = response.text if response.status_code == 200 else ""
+            
+            sitemap_url = ''
+            for line in content.split('\n'):
+                if line.strip().lower().startswith('sitemap:'):
+                    sitemap_url = line.split(':', 1)[1].strip()
+                    break
+            
+            self.logger.info(f"  ✓ robots.txt trovato, sitemap dichiarata: {sitemap_url if sitemap_url else 'N/A'}")
+            
+            return {
+                'exists': bool(content),
+                'content': content,
+                'has_sitemap': bool(sitemap_url),
+                'sitemap_url': sitemap_url,
+                'status_code': response.status_code
+            }
+        except Exception as e:
+            self.logger.warning(f"  ⚠️  Errore robots.txt: {e}")
             return {'exists': False, 'content': '', 'has_sitemap': False, 'sitemap_url': '', 'status_code': 0}
-        
-        sitemap_url = ''
-        for line in content.split('\n'):
-            if line.strip().lower().startswith('sitemap:'):
-                sitemap_url = line.split(':', 1)[1].strip()
-                break
-        
-        self.logger.info(f"  ✓ robots.txt trovato, sitemap dichiarata: {sitemap_url if sitemap_url else 'N/A'}")
-        
-        return {
-            'exists': True,
-            'content': content,
-            'has_sitemap': bool(sitemap_url),
-            'sitemap_url': sitemap_url,
-            'status_code': 200
-        }
     
     def _check_404(self, domain):
+        """Verifica pagina 404 personalizzata."""
         try:
-            response = self.session.get(f"{domain}/test-404-page", timeout=10, allow_redirects=False)
+            response = self.session.get(f"{domain}/test-404-page-xyz123", timeout=10, allow_redirects=False)
             return {'is_custom': response.status_code == 404 and len(response.content) > 500}
         except:
             return {'is_custom': False}
     
     def _check_redirect(self, domain):
+        """Verifica redirect HTTP to HTTPS."""
         clean_domain = domain.replace('https://', '').replace('http://', '').replace('www.', '')
         try:
             response = self.session.get(f"http://{clean_domain}", timeout=10, allow_redirects=False)
@@ -658,19 +666,17 @@ class HTMLCollector(BaseCollector):
         return list(urls)
     
     def _download_and_parse_sitemap(self, sitemap_url: str) -> List[str]:
-        """Scarica e parsifica una sitemap con tentativi multipli."""
-        success, content = retry_with_user_agents(
-            sitemap_url,
-            self.session,
-            timeout=15,
-            logger=self.logger
-        )
-        
-        if not success or not content:
+        """Scarica e parsifica una sitemap."""
+        try:
+            response = self.session.get(sitemap_url, timeout=15)
+            if response.status_code != 200:
+                return []
+            
+            content = response.text
+            return self._parse_sitemap_content(content, sitemap_url)
+        except Exception as e:
+            self.logger.warning(f"  ⚠️  Errore download sitemap: {e}")
             return []
-        
-        self.logger.debug(f"    📄 Scaricata: {len(content)} bytes")
-        return self._parse_sitemap_content(content, sitemap_url)
     
     def _parse_sitemap_content(self, content: str, base_url: str) -> List[str]:
         """Parsa il contenuto di una sitemap (anche sitemap index)."""
@@ -798,7 +804,7 @@ class HTMLCollector(BaseCollector):
         
         title_text = title_tag.get_text().strip()
         char_count = len(title_text)
-        pixel_width = self._estimate_pixel_width(title_text, is_title=True)
+        pixel_width = estimate_pixel_width(title_text, is_title=True)
         
         if char_count > 60:
             problems.append({
@@ -843,7 +849,7 @@ class HTMLCollector(BaseCollector):
         
         desc_text = meta.get('content', '').strip()
         char_count = len(desc_text)
-        pixel_width = self._estimate_pixel_width(desc_text, is_title=False)
+        pixel_width = estimate_pixel_width(desc_text, is_title=False)
         
         if char_count > 155:
             problems.append({
@@ -981,14 +987,6 @@ class HTMLCollector(BaseCollector):
         except:
             pass
         return None
-    
-    def _estimate_pixel_width(self, text: str, is_title: bool = True) -> int:
-        """Stima la larghezza in pixel di un testo nelle SERP Google."""
-        if not text:
-            return 0
-        
-        px_per_char = 8.5 if is_title else 6.8
-        return int(len(text) * px_per_char)
     
     # ============================================
     # METODI DI ANALISI TECNICA AVANZATA
