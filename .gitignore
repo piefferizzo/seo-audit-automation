@@ -32,3 +32,4 @@ venv/
 .DS_Store
 **/.DS_Store
 Thumbs.db
+focus_keywords.yaml
