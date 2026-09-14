@@ -16,9 +16,19 @@ v2.3.2 (Strada A — URL Inspection API reale):
 
 v2.3.7 (dedup drilldown):
 - _extract_drilldown_data deduplica le righe di problemi drilldown
-  per chiave composta (URL + problema). Su siti con template ripetuto
-  (logo e immagini footer su ogni pagina), il foglio HTML-IMG passava
-  da ~30 immagini uniche a ~300 righe duplicate. Ora la lista è pulita.
+  per chiave composta (URL + problema).
+
+v2.3.8 (focus keywords):
+- Nuovo check C-10 "Focus Keyword per URL".
+- Il campo 'focus_keywords' viene esposto nei dati drilldown.
+
+v2.3.9 (soft matching):
+- C-05: label "Densità keyword: 0.00% (non presente)" invece di
+  "non calcolabile" quando la densità è 0. Non è più un errore tecnico
+  ma una misura.
+- C-10: FAIL solo se la keyword non è in title, non è in H1 e ha
+  density = 0. Negli altri casi WARN. Riduce i falsi FAIL quando
+  la keyword è semanticamente vicina al contenuto.
 """
 
 from typing import Dict, Any, List, Optional, Tuple
@@ -82,21 +92,11 @@ class AuditProcessor:
         self.logger = setup_logger("AuditProcessor")
 
     # ------------------------------------------------------------------
-    # UTILITY — deduplicazione righe drilldown (FIX v2.3.7)
+    # UTILITY — deduplicazione righe drilldown
     # ------------------------------------------------------------------
     @staticmethod
     def _dedupe_rows(rows: List[Dict], key_fields: List[str]) -> List[Dict]:
-        """Rimuove duplicati da una lista di dict, mantenendo l'ordine.
-
-        La chiave di dedup è composta dai valori dei campi in `key_fields`.
-        Se uno dei campi manca, viene usato stringa vuota.
-
-        Esempio d'uso: righe di problemi immagini duplicate perché la
-        stessa immagine (es. logo, footer banner) compare su ogni pagina.
-        Con la chiave ('url', 'problem') l'immagine + problema viene
-        contata una sola volta, indipendentemente da quante pagine la
-        contengono.
-        """
+        """Rimuove duplicati da una lista di dict, mantenendo l'ordine."""
         seen = set()
         result = []
         for row in rows:
@@ -106,6 +106,9 @@ class AuditProcessor:
                 result.append(row)
         return result
 
+    # ------------------------------------------------------------------
+    # ENTRY POINT
+    # ------------------------------------------------------------------
     def process(self, domain: str, raw_data: Dict[str, Any]) -> Dict[str, List[Dict]]:
         self.logger.debug(f"  🔍 DEBUG - Dati ricevuti nel processore:")
         self.logger.debug(f"    - pagespeed: {bool(raw_data.get('pagespeed'))}")
@@ -164,13 +167,10 @@ class AuditProcessor:
             "drilldown": drilldown_data
         }
 
+    # ------------------------------------------------------------------
+    # DRILLDOWN EXTRACTION
+    # ------------------------------------------------------------------
     def _extract_drilldown_data(self, html_data: Dict) -> Dict[str, List[Dict]]:
-        """Estrae i dati drill-down dal crawler HTML, includendo la homepage.
-
-        FIX v2.3.7: deduplica per chiave composta. Su siti con template
-        ripetuto (header/footer con stesso logo e immagini su ogni pagina),
-        prima il foglio HTML-IMG conteneva centinaia di righe duplicate.
-        """
         drilldown = html_data.get('drilldown', {}) if html_data else {}
 
         homepage_problems = self._extract_homepage_problems(html_data)
@@ -179,19 +179,21 @@ class AuditProcessor:
         title_problems = homepage_problems.get('titles', []) + drilldown.get('title_problems', [])
         description_problems = homepage_problems.get('descriptions', []) + drilldown.get('description_problems', [])
         headings_problems = homepage_problems.get('headings', []) + drilldown.get('headings_problems', [])
+        focus_keyword_problems = drilldown.get('focus_keyword_problems', [])
 
-        # Dedup per chiave composta (fix v2.3.7)
         images_problems = self._dedupe_rows(images_problems, ['url', 'problem'])
         title_problems = self._dedupe_rows(title_problems, ['url', 'problem'])
         description_problems = self._dedupe_rows(description_problems, ['url', 'problem'])
         headings_problems = self._dedupe_rows(headings_problems, ['url', 'problem'])
+        focus_keyword_problems = self._dedupe_rows(focus_keyword_problems, ['url', 'problem'])
 
         self.logger.debug(
             f"  🧹 Dedup drilldown — "
             f"images: {len(images_problems)}, "
             f"titles: {len(title_problems)}, "
             f"descriptions: {len(description_problems)}, "
-            f"headings: {len(headings_problems)}"
+            f"headings: {len(headings_problems)}, "
+            f"focus_keywords: {len(focus_keyword_problems)}"
         )
 
         return {
@@ -199,6 +201,7 @@ class AuditProcessor:
             'titles': title_problems,
             'descriptions': description_problems,
             'headings': headings_problems,
+            'focus_keywords': focus_keyword_problems,
             'pages_analyzed': len(drilldown.get('pages_analyzed', []))
         }
 
@@ -428,7 +431,7 @@ class AuditProcessor:
                     parts.append(f"{len(new_queries)} keyword nuove")
 
                 risultato = ", ".join(parts)
-                stato, sev = ("OK", 0) if len(growing) > len(declining) else ("WARN", 2)
+                stato, sev = ("OK", 0) if len(growing) >= len(declining) else ("WARN", 2)
 
                 rows.append(make_audit_row(
                     "GSC-08", "General", "Trend Keyword (vs periodo precedente)", stato, sev, risultato,
@@ -753,8 +756,6 @@ class AuditProcessor:
             return rows
 
         # T-02: Sitemap
-        # FIX v2.3.7: il collector ora popola correttamente 'sitemap'
-        # anche quando trovata via robots.txt (found_via='robots').
         sitemap = data.get('sitemap', {})
 
         if not sitemap.get('exists') and gsc_data and gsc_data.get('sitemaps', {}).get('found'):
@@ -1284,9 +1285,14 @@ class AuditProcessor:
                 "Includere keyword principale nell'H1" if not keyword_in_h1 else "",
             ))
 
+            # C-05 (fix v2.3.9): label "0.00% (non presente)" invece di
+            # "non calcolabile" quando la densità è 0. È un dato reale,
+            # non un errore tecnico.
             density = content_quality.get('keyword_density', 0)
             if density == 0:
-                stato, sev, risultato, note = "WARN", 2, "Densità keyword non calcolabile", "Verificare presenza keyword nel contenuto"
+                stato, sev = "WARN", 2
+                risultato = "Densità keyword: 0.00% (non presente)"
+                note = "Verificare presenza keyword nel contenuto"
             elif 1.0 <= density <= 3.0:
                 stato, sev, risultato, note = "OK", 0, f"Densità keyword: {density}% (ottimale)", ""
             elif density < 1.0:
@@ -1358,6 +1364,50 @@ class AuditProcessor:
                 stato, sev, risultato, note = "N/A", 0, "Non necessaria (sito corporate)", ""
 
             rows.append(make_audit_row("C-09", "Content", "Content Freshness", stato, sev, risultato, homepage.get('url', ''), note))
+
+        # C-10 (fix v2.3.9): FAIL solo se la keyword non è in title, non è
+        # in H1 e ha density = 0. Negli altri casi WARN, perché il
+        # contenuto è "vicino" all'ottimizzazione.
+        focus_kw = content_quality.get('focus_keyword', '')
+        is_from_config = content_quality.get('is_from_config', False)
+
+        if focus_kw and is_from_config:
+            kw_in_title = content_quality.get('keyword_in_title', False)
+            kw_in_h1 = content_quality.get('keyword_in_h1', False)
+            density = content_quality.get('keyword_density', 0)
+
+            issues = []
+            if not kw_in_title:
+                issues.append("non nel title")
+            if not kw_in_h1:
+                issues.append("non nell'H1")
+            if density < 0.8:
+                issues.append(f"density bassa ({density}%)")
+            elif density > 3.5:
+                issues.append(f"density alta ({density}%)")
+
+            if not issues:
+                stato, sev = "OK", 0
+                risultato = f"'{focus_kw}' ottimizzata (density {density}%, title OK, H1 OK)"
+            elif len(issues) == 1:
+                stato, sev = "WARN", 2
+                risultato = f"'{focus_kw}': {issues[0]}"
+            elif len(issues) == 2:
+                stato, sev = "WARN", 2
+                risultato = f"'{focus_kw}': {', '.join(issues)}"
+            else:
+                # 3+ problemi: FAIL solo se completamente assente
+                if not kw_in_title and not kw_in_h1 and density == 0:
+                    stato, sev = "FAIL", 1
+                else:
+                    stato, sev = "WARN", 2
+                risultato = f"'{focus_kw}': {', '.join(issues)}"
+
+            rows.append(make_audit_row(
+                "C-10", "Content", "Focus Keyword per URL", stato, sev,
+                risultato, homepage.get('url', ''),
+                f"Keyword assegnata: {focus_kw}"
+            ))
 
         return rows
 
@@ -1574,9 +1624,9 @@ class AuditProcessor:
 
             rows.append(make_audit_row(
                 "GEO-02", "GEO", "AI Readability Score", stato, sev,
-                f"{score}/100 (Direct answer: {'✓' if ai_readability.get('has_direct_answer') else '✗'}, "
-                f"FAQ: {'✓' if ai_readability.get('has_faq_format') else '✗'}, "
-                f"List: {'✓' if ai_readability.get('has_list_format') else '✗'})",
+                f"{score}/100 (Direct answer: {'OK' if ai_readability.get('has_direct_answer') else 'KO'}, "
+                f"FAQ: {'OK' if ai_readability.get('has_faq_format') else 'KO'}, "
+                f"List: {'OK' if ai_readability.get('has_list_format') else 'KO'})",
                 domain,
                 "Migliorare struttura per AI Overviews e featured snippets" if score < 70 else ""
             ))
@@ -1661,6 +1711,7 @@ class AuditProcessor:
         {"audit_id": "C-07", "trigger_stati": ["FAIL"], "fase": "1. Fondamenta", "azione": "Rimuovere doorway pages", "owner": "SEO", "kpi": "0 doorway pages"},
         {"audit_id": "C-08", "trigger_stati": ["WARN", "FAIL"], "fase": "2. Architettura", "azione": "Differenziare contenuti duplicati", "owner": "SEO / Copywriting", "kpi": "100% contenuti unici"},
         {"audit_id": "C-09", "trigger_stati": ["WARN"], "fase": "2. Architettura", "azione": "Aggiungere data di pubblicazione ai contenuti", "owner": "Sviluppo / SEO", "kpi": "100% contenuti con data"},
+        {"audit_id": "C-10", "trigger_stati": ["WARN", "FAIL"], "fase": "2. Architettura", "azione": "Ottimizzare la focus keyword assegnata all'URL", "owner": "SEO", "kpi": "Keyword in title, H1 e density 1-3%"},
         {"audit_id": "T-23", "trigger_stati": ["FAIL"], "fase": "1. Fondamenta", "azione": "Rinnovare dominio in scadenza", "owner": "Sviluppo", "kpi": "Dominio valido per almeno 1 anno"},
         {"audit_id": "H-16", "trigger_stati": ["FAIL"], "fase": "2. Architettura", "azione": "Aggiungere favicon al sito", "owner": "Sviluppo", "kpi": "Favicon presente in tutti i formati"},
         {"audit_id": "H-17", "trigger_stati": ["WARN"], "fase": "2. Architettura", "azione": "Ottimizzare immagini per indicizzazione", "owner": "Sviluppo / SEO", "kpi": "100% immagini con alt, dimensioni e formato moderno"},
@@ -1755,7 +1806,7 @@ class AuditProcessor:
         return {
             "domain": domain,
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "version": "2.3.7 Drilldown Dedup",
+            "version": "2.3.9 Soft Matching",
             "health_score": health_score,
             "total_checks": total,
             "fails": fails,

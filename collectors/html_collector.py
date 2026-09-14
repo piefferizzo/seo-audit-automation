@@ -7,6 +7,7 @@ import re
 import json
 import time
 from collectors.base_collector import BaseCollector
+from utils.focus_keywords import FocusKeywordsManager
 
 
 # ---------------------------------------------------------------------------
@@ -68,14 +69,108 @@ def estimate_pixel_width(text: str, is_title: bool = True) -> int:
     return int(len(text) * px_per_char)
 
 
+def tokenize_keyword(keyword: str) -> List[str]:
+    """Estrae i termini 'puliti' da una keyword.
+
+    Esempi:
+        "musei dell'olio italia" → ["musei", "dell", "olio", "italia"]
+        "olive oil tourism"      → ["olive", "oil", "tourism"]
+        "caffè letterario"       → ["caffè", "letterario"]
+    """
+    if not keyword:
+        return []
+    return re.findall(r'\w+', keyword.lower())
+
+
+def soft_match_count(keyword_terms: List[str], text: str) -> int:
+    """Conta quante occorrenze minime di TUTTI i termini della keyword
+    sono presenti nel testo (soft match, ordine irrilevante).
+
+    Esempio:
+        keyword_terms = ["oleoturismo", "liguria"]
+        text = "l'oleoturismo in Liguria è ... oleoturismo diffuso in Liguria"
+        → ogni termine compare 2 volte → ritorna 2
+
+    Ritorna 0 se almeno uno dei termini non è presente.
+    """
+    if not keyword_terms:
+        return 0
+
+    text_lower = text.lower()
+    counts = []
+    for term in keyword_terms:
+        # Conteggio come parola intera (word boundary)
+        c = len(re.findall(r'\b' + re.escape(term) + r'\b', text_lower))
+        counts.append(c)
+
+    if not counts:
+        return 0
+
+    return min(counts)
+
+
+def compute_density(
+    keyword: str,
+    content_text: str,
+    word_count: int = None,
+) -> Tuple[float, int]:
+    """Calcola density con approccio ibrido.
+
+    Ritorna (density, keyword_word_count).
+
+    Modalità:
+      - keyword singola: conta parole che contengono il termine (substring)
+      - keyword multi-parola:
+          - prova prima match esatto (substring contigua)
+          - poi soft match (tutti i termini presenti, ordine irrilevante)
+          - usa il massimo
+
+    La density è in percentuale e rappresenta la proporzione di "parole
+    occupate" dalla keyword nel contenuto.
+    """
+    if not keyword or not content_text:
+        return 0.0, 0
+
+    if word_count is None:
+        word_count = len(content_text.split())
+
+    if word_count == 0:
+        return 0.0, 0
+
+    keyword_lower = keyword.lower()
+
+    # --- Match esatto (substring contigua) ---
+    if ' ' in keyword_lower:
+        hard_count = content_text.lower().count(keyword_lower)
+        hard_words = hard_count * len(keyword_lower.split())
+    else:
+        hard_words = sum(1 for w in content_text.lower().split() if keyword_lower in w)
+        hard_count = hard_words
+
+    # --- Soft match (tutti i termini presenti) ---
+    terms = tokenize_keyword(keyword_lower)
+    soft_count = soft_match_count(terms, content_text)
+    soft_words = soft_count * len(terms) if terms else 0
+
+    # Usa il massimo tra i due
+    effective_words = max(hard_words, soft_words)
+    density = (effective_words / word_count) * 100
+
+    return round(density, 2), effective_words
+
+
 class HTMLCollector(BaseCollector):
     """Crawler HTML avanzato con analisi multi-pagina per drill-down.
 
-    v2.3.7 — modifiche:
-    - FIX T-02: results['sitemap'] ora viene aggiornato dopo il download
-      della sitemap da robots.txt. Prima era sempre {'exists': False},
-      causando un FAIL falso su T-02 anche quando la sitemap esisteva
-      ed era stata parsata con successo.
+    v2.3.9 — modifiche:
+    - Fix label C-05 (in audit_processor): "non calcolabile" → "0.00%".
+    - Soft matching per la density: oltre al match esatto (substring),
+      conta anche le occorrenze di tutti i termini separatamente
+      (ordine irrilevante). Risolve i falsi 0.00% quando la keyword è
+      "oleoturismo liguria" e il testo dice "l'oleoturismo in Liguria".
+    - Title/H1 check con soft match: la keyword è considerata presente
+      se tutti i suoi termini compaiono nel title/H1, indipendentemente
+      dall'ordine.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -96,6 +191,10 @@ class HTMLCollector(BaseCollector):
         )
 
         self.focus_keyword = (config.get('focus_keyword') or '').strip().lower()
+        # Il manager viene (ri)istanziato in collect() perché ha bisogno
+        # del dominio per selezionare la sezione corretta in file multi-dominio.
+        self.focus_keywords_mgr = None
+        self._focus_keywords_file = config.get('FOCUS_KEYWORDS_FILE', 'focus_keywords.yaml')
 
         self.headers = {
             'User-Agent': USER_AGENT,
@@ -153,6 +252,24 @@ class HTMLCollector(BaseCollector):
         if not domain.startswith('http'):
             domain = f"https://{domain}"
 
+        # Inizializza il FocusKeywordsManager per il dominio corrente
+        # (necessario per file multi-dominio)
+        self.focus_keywords_mgr = FocusKeywordsManager(
+            self._focus_keywords_file,
+            domain=domain,
+        )
+        self.focus_keywords_mgr.load()
+        if self.focus_keywords_mgr.count > 0:
+            self.logger.info(
+                f"  📋 focus_keywords.yaml: {self.focus_keywords_mgr.count} keyword "
+                f"mappate per {self.focus_keywords_mgr.domain}"
+            )
+        else:
+            self.logger.debug(
+                f"  📋 Nessuna keyword trovata per {self.focus_keywords_mgr.domain} "
+                f"in {self._focus_keywords_file}"
+            )
+
         results = {}
 
         try:
@@ -164,14 +281,11 @@ class HTMLCollector(BaseCollector):
 
             results['homepage'] = homepage_data
 
-            # 2. Verifiche base
             results['robots'] = self._check_robots(domain)
-            # Placeholder, verrà aggiornato sotto dopo il download sitemap
             results['sitemap'] = {'exists': False, 'url': f"{domain}/sitemap.xml"}
             results['404'] = self._check_404(domain)
             results['redirect'] = self._check_redirect(domain)
 
-            # 3. Check tecnici avanzati
             results['www_redirect'] = self._check_www_redirect(domain)
             results['mixed_content'] = self._check_mixed_content(homepage_data)
             results['redirect_chains'] = self._check_redirect_chains(domain)
@@ -183,23 +297,10 @@ class HTMLCollector(BaseCollector):
             results['pagination_advanced'] = self._check_pagination_advanced(homepage_data)
             results['subdomains'] = self._detect_subdomains(homepage_data, domain)
 
-            # 4. Raccolta URL da sitemap
             self.logger.info(f"  📋 Raccolta URL per drill-down...")
             all_urls = self._collect_urls_from_sitemap(domain, homepage_data, results['robots'])
 
-            # ------------------------------------------------------------------
-            # FIX T-02: aggiorna results['sitemap'] in base a cosa abbiamo trovato.
-            # Strategia:
-            #   1. Se robots.txt dichiara una sitemap E il download ha avuto
-            #      successo (più URL della sola homepage) → exists=True,
-            #      found_via='robots'.
-            #   2. Altrimenti se abbiamo trovato URL da URL comuni
-            #      (sitemap.xml, wp-sitemap.xml, ecc.) → exists=True,
-            #      found_via='discovery'.
-            #   3. Altrimenti → exists=False (FAIL reale).
-            # ------------------------------------------------------------------
             robots_sitemap_url = results['robots'].get('sitemap_url', '')
-            # Numero di URL trovati OLTRE alla homepage (che viene sempre aggiunta)
             urls_from_sitemap = [u for u in all_urls if u.rstrip('/') != domain.rstrip('/')]
 
             if robots_sitemap_url and urls_from_sitemap:
@@ -216,19 +317,7 @@ class HTMLCollector(BaseCollector):
                     f"({len(urls_from_sitemap)} URL)"
                 )
             elif urls_from_sitemap:
-                # Trovata via discovery (URL comuni), non via robots
-                candidate_urls = [
-                    f"{domain}/sitemap.xml",
-                    f"{domain}/sitemap_index.xml",
-                    f"{domain}/wp-sitemap.xml",
-                    f"{domain}/sitemap/sitemap.xml",
-                    f"{domain}/sitemap-index.xml",
-                ]
-                found_url = candidate_urls[0]  # default
-                for candidate in candidate_urls:
-                    if candidate in (robots_sitemap_url or ''):
-                        found_url = candidate
-                        break
+                found_url = f"{domain}/sitemap.xml"
                 results['sitemap'] = {
                     'exists': True,
                     'url': found_url,
@@ -259,7 +348,6 @@ class HTMLCollector(BaseCollector):
                 urls_to_crawl = all_urls[:self.max_pages]
                 self.logger.info(f"  🎯 URL da analizzare (limite {self.max_pages}): {len(urls_to_crawl)}")
 
-            # 5. Crawling profondo
             if urls_to_crawl:
                 self.logger.info(f"  🔍 Avvio crawling drill-down...")
                 drilldown_data = self._crawl_pages_for_drilldown(urls_to_crawl)
@@ -271,6 +359,7 @@ class HTMLCollector(BaseCollector):
                 self.logger.debug(f"    - Problemi title: {len(drilldown_data.get('title_problems', []))}")
                 self.logger.debug(f"    - Problemi description: {len(drilldown_data.get('description_problems', []))}")
                 self.logger.debug(f"    - Problemi headings: {len(drilldown_data.get('headings_problems', []))}")
+                self.logger.debug(f"    - Problemi focus keyword: {len(drilldown_data.get('focus_keyword_problems', []))}")
             else:
                 self.logger.warning(f"  ⚠️  Nessuna URL trovata per drill-down!")
                 results['drilldown'] = {
@@ -278,10 +367,10 @@ class HTMLCollector(BaseCollector):
                     'images_problems': [],
                     'title_problems': [],
                     'description_problems': [],
-                    'headings_problems': []
+                    'headings_problems': [],
+                    'focus_keyword_problems': [],
                 }
 
-            # 6. Crawling pagine interne
             if homepage_data.get('internal_links'):
                 internal_pages = homepage_data['internal_links'][:5]
                 results['internal_pages'] = []
@@ -295,7 +384,6 @@ class HTMLCollector(BaseCollector):
                     except Exception as e:
                         self.logger.warning(f"Errore crawling {page_url}: {e}")
 
-            # 7. Analisi standard
             results['breadcrumbs'] = self._detect_breadcrumbs(homepage_data)
             results['anchor_text'] = self._analyze_anchor_text(homepage_data)
             results['url_structure'] = self._analyze_url_structure(homepage_data)
@@ -305,11 +393,8 @@ class HTMLCollector(BaseCollector):
             results['site_structure'] = self._analyze_site_structure(results.get('internal_pages', []))
             results['cdn_check'] = self._check_cdn(homepage_data)
             results['image_dimensions'] = self._analyze_image_dimensions(homepage_data)
-
-            # 8. Favicon
             results['favicon'] = self._check_favicon(homepage_data, domain)
 
-            # 9. Analisi contenuti
             results['site_type'] = self._detect_site_type(homepage_data)
             results['content_quality'] = self._analyze_content_quality(homepage_data)
             results['doorway_pages'] = self._detect_doorway_pages(homepage_data)
@@ -373,10 +458,6 @@ class HTMLCollector(BaseCollector):
     def _extract_page_data(self, soup: BeautifulSoup, url: str, final_url: str, headers: Dict) -> Dict[str, Any]:
         css_files = self._get_css_files(soup, url)
         js_files = self._get_js_files(soup, url)
-
-        self.logger.debug(f"  🔍 Pagina: {url}")
-        self.logger.debug(f"    - CSS: {len(css_files)} file")
-        self.logger.debug(f"    - JS: {len(js_files)} file")
 
         content_soup = BeautifulSoup(str(soup), 'html.parser')
         for elem in content_soup(['script', 'style', 'nav', 'footer', 'header']):
@@ -531,21 +612,18 @@ class HTMLCollector(BaseCollector):
 
     def _get_css_files(self, soup, base_url):
         css_files = []
-
         for link in soup.find_all('link', rel='stylesheet'):
             href = link.get('href')
             if href:
                 full_url = urljoin(base_url, href)
                 if full_url not in css_files:
                     css_files.append(full_url)
-
         for link in soup.find_all('link', type='text/css'):
             href = link.get('href')
             if href:
                 full_url = urljoin(base_url, href)
                 if full_url not in css_files:
                     css_files.append(full_url)
-
         for link in soup.find_all('link'):
             rel = link.get('rel', [])
             rel_str = ' '.join(rel).lower() if isinstance(rel, list) else str(rel).lower()
@@ -555,62 +633,53 @@ class HTMLCollector(BaseCollector):
                     full_url = urljoin(base_url, href)
                     if full_url not in css_files:
                         css_files.append(full_url)
-
         for style in soup.find_all('style', src=True):
             src = style.get('src')
             if src:
                 full_url = urljoin(base_url, src)
                 if full_url not in css_files:
                     css_files.append(full_url)
-
         for link in soup.find_all('link'):
             href = link.get('href', '')
             if href and href.lower().endswith('.css'):
                 full_url = urljoin(base_url, href)
                 if full_url not in css_files:
                     css_files.append(full_url)
-
         self.logger.debug(f"  🎨 CSS files trovati: {len(css_files)}")
         return css_files
 
     def _get_js_files(self, soup, base_url):
         js_files = []
-
         for script in soup.find_all('script', src=True):
             src = script.get('src')
             if src:
                 full_url = urljoin(base_url, src)
                 if full_url not in js_files:
                     js_files.append(full_url)
-
         for script in soup.find_all('script', type='text/javascript'):
             src = script.get('src')
             if src:
                 full_url = urljoin(base_url, src)
                 if full_url not in js_files:
                     js_files.append(full_url)
-
         for script in soup.find_all('script', type='module'):
             src = script.get('src')
             if src:
                 full_url = urljoin(base_url, src)
                 if full_url not in js_files:
                     js_files.append(full_url)
-
         for script in soup.find_all('script'):
             src = script.get('src', '')
             if src and src.lower().endswith('.js'):
                 full_url = urljoin(base_url, src)
                 if full_url not in js_files:
                     js_files.append(full_url)
-
         for script in soup.find_all('script', type='application/javascript'):
             src = script.get('src')
             if src:
                 full_url = urljoin(base_url, src)
                 if full_url not in js_files:
                     js_files.append(full_url)
-
         self.logger.debug(f"  📜 JS files trovati: {len(js_files)}")
         return js_files
 
@@ -756,6 +825,7 @@ class HTMLCollector(BaseCollector):
             'title_problems': [],
             'description_problems': [],
             'headings_problems': [],
+            'focus_keyword_problems': [],
         }
 
         total = len(urls)
@@ -782,6 +852,7 @@ class HTMLCollector(BaseCollector):
                     drilldown['title_problems'].extend(page_info.get('title_problems', []))
                     drilldown['description_problems'].extend(page_info.get('description_problems', []))
                     drilldown['headings_problems'].extend(page_info.get('headings_problems', []))
+                    drilldown['focus_keyword_problems'].extend(page_info.get('focus_keyword_problems', []))
                 else:
                     error_count += 1
 
@@ -812,10 +883,102 @@ class HTMLCollector(BaseCollector):
                 'description_problems': self._analyze_description_deep(soup, url),
                 'headings_problems': self._analyze_headings_deep(soup, url),
                 'image_problems': self._analyze_images_deep(soup, url),
+                'focus_keyword_problems': self._analyze_focus_keyword_deep(soup, url),
             }
         except Exception as e:
             self.logger.warning(f"Errore analisi profonda {url}: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # Focus keyword per URL (v2.3.9 con soft matching)
+    # ------------------------------------------------------------------
+
+    def _analyze_focus_keyword_deep(self, soup: BeautifulSoup, url: str) -> List[Dict]:
+        """Verifica che la keyword assegnata all'URL sia ottimizzata.
+
+        v2.3.9 — soft matching:
+          - La keyword è considerata "nel title/H1" se TUTTI i suoi termini
+            sono presenti (ordine irrilevante).
+          - La density usa il massimo tra match esatto e soft match.
+        """
+        fk_data = self.focus_keywords_mgr.get_for_url(url)
+        if not fk_data:
+            return []
+
+        primary = (fk_data.get('primary') or '').strip().lower()
+        if not primary:
+            return []
+
+        problems = []
+
+        # Estrai testo dal contenuto (senza script/style/nav/footer)
+        content_soup = BeautifulSoup(str(soup), 'html.parser')
+        for elem in content_soup(['script', 'style', 'nav', 'footer', 'header']):
+            elem.decompose()
+        content_text = content_soup.get_text(separator=' ', strip=True).lower()
+        word_count = len(content_text.split())
+
+        # Calcola density con soft matching
+        density, _ = compute_density(primary, content_text, word_count)
+
+        # Title e H1 con soft match
+        title_tag = soup.find('title')
+        title_text = title_tag.get_text().strip().lower() if title_tag else ''
+
+        h1_tags = soup.find_all('h1')
+        h1_text = ' '.join(h.get_text().strip().lower() for h in h1_tags)
+
+        # Termini della keyword
+        terms = tokenize_keyword(primary)
+
+        # Keyword presente se tutti i termini sono presenti (soft match)
+        def is_present(text: str, terms: List[str]) -> bool:
+            if not terms:
+                return False
+            text_lower = text.lower()
+            return all(
+                re.search(r'\b' + re.escape(t) + r'\b', text_lower) is not None
+                for t in terms
+            )
+
+        kw_in_title = is_present(title_text, terms)
+        kw_in_h1 = is_present(h1_text, terms)
+
+        # ----- Valutazione -----
+        opts = self.focus_keywords_mgr.options
+        min_d = opts.get('min_density', 0.8)
+        max_d = opts.get('max_density', 3.5)
+        check_title = opts.get('check_title', True)
+        check_h1 = opts.get('check_h1', True)
+
+        if check_title and not kw_in_title:
+            problems.append({
+                'url': url,
+                'focus_keyword': primary,
+                'problem': 'Keyword non presente nel title',
+            })
+
+        if check_h1 and not kw_in_h1:
+            problems.append({
+                'url': url,
+                'focus_keyword': primary,
+                'problem': 'Keyword non presente nell\'H1',
+            })
+
+        if density < min_d:
+            problems.append({
+                'url': url,
+                'focus_keyword': primary,
+                'problem': f'Density bassa ({density:.2f}%, min {min_d}%)',
+            })
+        elif density > max_d:
+            problems.append({
+                'url': url,
+                'focus_keyword': primary,
+                'problem': f'Density alta ({density:.2f}%, max {max_d}%)',
+            })
+
+        return problems
 
     def _analyze_title_deep(self, soup, url):
         problems = []
@@ -963,7 +1126,6 @@ class HTMLCollector(BaseCollector):
 
     def _check_www_redirect(self, domain: str) -> Dict[str, Any]:
         clean_domain = domain.replace('https://', '').replace('http://', '').replace('www.', '')
-
         results = {'www_to_non_www': None, 'non_www_to_www': None, 'consistent': False}
 
         try:
@@ -992,16 +1154,13 @@ class HTMLCollector(BaseCollector):
 
     def _check_mixed_content(self, homepage_data: Dict) -> Dict[str, Any]:
         mixed_content = []
-
         for img in homepage_data.get('images', []):
             src = img.get('src', '')
             if src.startswith('http://'):
                 mixed_content.append({'type': 'image', 'url': src})
-
         for css in homepage_data.get('css_files', []):
             if css.startswith('http://'):
                 mixed_content.append({'type': 'css', 'url': css})
-
         for js in homepage_data.get('js_files', []):
             if js.startswith('http://'):
                 mixed_content.append({'type': 'js', 'url': js})
@@ -1226,6 +1385,12 @@ class HTMLCollector(BaseCollector):
         return site_type
 
     def _analyze_content_quality(self, homepage_data: Dict) -> Dict[str, Any]:
+        """Analizza la qualità del contenuto (v2.3.9 con soft matching).
+
+        - La keyword è scelta: focus_keywords.yaml → config → euristica.
+        - keyword_in_title / keyword_in_h1 usano soft match (tutti i termini).
+        - La density usa il massimo tra match esatto e soft match.
+        """
         word_count = homepage_data.get('word_count', 0)
         title = homepage_data.get('title', '')
         h1_list = homepage_data.get('headings', {}).get('h1', [])
@@ -1233,31 +1398,40 @@ class HTMLCollector(BaseCollector):
         url = homepage_data.get('url', '')
         content_text = homepage_data.get('content_text', '')
 
-        title_words_set = set(title.lower().split())
-        h1_words_set = set()
-        for h1 in h1_list:
-            h1_words_set.update(h1.lower().split())
+        # Sceglie la keyword
+        main_keyword, is_from_config = self._pick_main_keyword(url, title, h1_list)
 
-        keyword_in_title = len(title_words_set) > 0
-        keyword_in_h1 = len(h1_words_set) > 0
-        keyword_in_url = any(word in url.lower() for word in title_words_set) if title_words_set else False
+        # Termini della keyword per soft match
+        terms = tokenize_keyword(main_keyword) if main_keyword else []
 
-        main_keyword = self._pick_main_keyword(title, h1_list)
+        def is_present(text: str, terms: List[str]) -> bool:
+            if not terms:
+                return False
+            text_lower = text.lower()
+            return all(
+                re.search(r'\b' + re.escape(t) + r'\b', text_lower) is not None
+                for t in terms
+            )
 
-        keyword_density = 0.0
-        if content_text and main_keyword:
-            content_words = content_text.lower().split()
-            if content_words:
-                if ' ' in main_keyword:
-                    kw_lower = main_keyword.lower()
-                    text_lower = content_text.lower()
-                    keyword_count = text_lower.count(kw_lower)
-                    keyword_word_count = keyword_count * len(main_keyword.split())
-                    keyword_density = (keyword_word_count / len(content_words)) * 100
-                else:
-                    keyword_count = sum(1 for w in content_words if main_keyword in w)
-                    keyword_density = (keyword_count / len(content_words)) * 100
+        # keyword_in_title / keyword_in_h1 con soft match
+        if main_keyword:
+            keyword_in_title = is_present(title, terms)
+            keyword_in_h1 = any(is_present(h, terms) for h in h1_list)
+            keyword_in_url = is_present(url, terms)
+        else:
+            # Fallback: vecchio comportamento (qualche parola del title)
+            title_words_set = set(title.lower().split())
+            h1_words_set = set()
+            for h1 in h1_list:
+                h1_words_set.update(h1.lower().split())
+            keyword_in_title = len(title_words_set) > 0
+            keyword_in_h1 = len(h1_words_set) > 0
+            keyword_in_url = any(word in url.lower() for word in title_words_set) if title_words_set else False
 
+        # Density con soft match
+        density, _ = compute_density(main_keyword, content_text, word_count)
+
+        # Readability
         readability_score = 0
         if content_text:
             sentences = content_text.count('.') + content_text.count('!') + content_text.count('?')
@@ -1271,36 +1445,50 @@ class HTMLCollector(BaseCollector):
             'keyword_in_h1': keyword_in_h1,
             'keyword_in_url': keyword_in_url,
             'focus_keyword': main_keyword,
-            'keyword_density': round(keyword_density, 2),
+            'is_from_config': is_from_config,
+            'keyword_density': round(density, 2),
             'readability_score': round(readability_score, 1),
             'title': title,
             'h1_count': len(h1_list),
             'meta_desc_length': len(meta_desc)
         }
 
-    def _pick_main_keyword(self, title: str, h1_list: List[str]) -> str:
-        if self.focus_keyword:
-            self.logger.debug(f"  🎯 Keyword density su focus_keyword esplicita: '{self.focus_keyword}'")
-            return self.focus_keyword
+    def _pick_main_keyword(self, url: str, title: str, h1_list: List[str]) -> Tuple[str, bool]:
+        """Sceglie la keyword principale in modo deterministico.
 
+        Ritorna (keyword, is_from_config):
+          - is_from_config=True  → keyword da focus_keywords.yaml
+          - is_from_config=False → keyword da config globale o euristica
+        """
+        # Priorità 1: focus_keywords.yaml (per-URL)
+        explicit_per_url = self.focus_keywords_mgr.get_primary(url)
+        if explicit_per_url:
+            self.logger.debug(f"  🎯 Keyword da focus_keywords.yaml per {url}: '{explicit_per_url}'")
+            return explicit_per_url.lower(), True
+
+        # Priorità 2: focus_keyword globale da config
+        if self.focus_keyword:
+            return self.focus_keyword, False
+
+        # Priorità 3: euristica (prima parola meaningful del title)
         if title:
             title_words_list = title.lower().split()
             for w in title_words_list:
                 clean = re.sub(r'[^\wàèéìòù]', '', w)
                 if clean and len(clean) > 3 and clean not in ITALIAN_STOP_WORDS:
-                    self.logger.debug(f"  🎯 Keyword density su parola del title: '{clean}'")
-                    return clean
+                    self.logger.debug(f"  🎯 Keyword euristica (title): '{clean}'")
+                    return clean, False
 
+        # Priorità 4: prima parola meaningful del primo H1
         if h1_list:
             first_h1_words = h1_list[0].lower().split()
             for w in first_h1_words:
                 clean = re.sub(r'[^\wàèéìòù]', '', w)
                 if clean and len(clean) > 3 and clean not in ITALIAN_STOP_WORDS:
-                    self.logger.debug(f"  🎯 Keyword density su parola dell'H1: '{clean}'")
-                    return clean
+                    self.logger.debug(f"  🎯 Keyword euristica (H1): '{clean}'")
+                    return clean, False
 
-        self.logger.debug(f"  ⚠️  Nessuna keyword meaningful trovata, density = 0")
-        return ""
+        return "", False
 
     def _detect_doorway_pages(self, homepage_data: Dict) -> Dict[str, Any]:
         word_count = homepage_data.get('word_count', 0)
