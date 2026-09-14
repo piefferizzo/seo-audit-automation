@@ -1,0 +1,90 @@
+╭─────────────────────────────────────────────────────────────────────────────────────────────────── Audit SEO ───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ 🚀 SEO Audit Automation Tool                                                                                                                                                                                    │
+│                                                                                                                                                                                                                 │
+│   Dominio: https://passionevo.com                                                                                                                                                                               │
+│   Data: 2026-09-14 17:00:04                                                                                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+📦 Fase 1: Raccolta dati
+  ⠋ Raccolta dati PageSpeedCollector...
+[09/14/26 17:00:04] INFO     🔍 Raccolta dati PageSpeed per https://passionevo.com...                                                                                                                              
+                    INFO     ✅ Cache HIT per https://passionevo.com (mobile)                                                                                                                                      
+                    INFO     ✅ Cache HIT per https://passionevo.com (desktop)                                                                                                                                     
+  ✓ PageSpeedCollector completato
+  ⠋ Raccolta dati GSCCollector...
+[09/14/26 17:00:04] INFO     🔍 Raccolta dati GSC per https://passionevo.com...                                                                                                                                    
+[09/14/26 17:00:06] INFO       ✓ Proprietà trovata per passionevo.com: sc-domain:passionevo.com                                                                                                                    
+                    INFO       ✓ Accesso GSC confermato per sc-domain:passionevo.com: siteFullUser                                                                                                                 
+[09/14/26 17:00:07] INFO       ✓ Top 10 pagine estratte                                                                                                                                                            
+                    INFO       ✓ Top 10 keyword estratte                                                                                                                                                           
+                    INFO       ✓ Dati dispositivo estratti: ['DESKTOP', 'MOBILE']                                                                                                                                  
+[09/14/26 17:00:08] INFO       ✓ Trend keyword estratti: 0 crescono, 0 calano, 1 nuove                                                                                                                             
+                    INFO       ✓ Distribuzione posizioni estratta: 23 keyword totali                                                                                                                               
+                    INFO       🔍 Recupero informazioni sitemap da GSC...                                                                                                                                          
+[09/14/26 17:00:09] INFO       🔍 Stima pagine indicizzate (URL Inspection API)...                                                                                                                                 
+                    INFO       📊 Fallback: stima basata su Performance API (20 pagine con dati)                                                                                                                   
+                    INFO       ✓ Trovate 32 pagine con dati performance                                                                                                                                            
+  ✓ GSCCollector completato
+  ⠋ Raccolta dati GA4Collector...
+[09/14/26 17:00:09] INFO     🔍 Raccolta dati GA4 per https://passionevo.com...                                                                                                                                    
+[09/14/26 17:00:22] INFO       ✓ Dati GA4 raccolti per property 522908052                                                                                                                                          
+  ✓ GA4Collector completato
+  ⠋ Raccolta dati HTMLCollector...
+[09/14/26 17:00:22] INFO     🔍 Crawling HTML avanzato per https://passionevo.com...                                                                                                                               
+[09/14/26 17:00:23] INFO       ✓ robots.txt trovato, sitemap dichiarata: https://passionevo.com/sitemap.xml                                                                                                        
+[09/14/26 17:00:24] INFO       📋 Raccolta URL per drill-down...                                                                                                                                                   
+                    INFO       📖 Tentativo download sitemap da robots.txt: https://passionevo.com/sitemap.xml                                                                                                     
+                    INFO       ✓ Trovate 28 URL dalla sitemap (robots.txt)                                                                                                                                         
+                    INFO       🎯 URL da analizzare (limite 200): 29                                                                                                                                               
+                    INFO       🔍 Avvio crawling drill-down...                                                                                                                                                     
+                    INFO       📊 Analisi drill-down: 1/29 pagine (0s, ETA 0s)                                                                                                                                     
+[09/14/26 17:00:38] INFO       📊 Analisi drill-down: 10/29 pagine (14s, ETA 27s)                                                                                                                                  
+[09/14/26 17:00:50] INFO       📊 Analisi drill-down: 20/29 pagine (26s, ETA 12s)                                                                                                                                  
+[09/14/26 17:01:02] INFO       ✅ Drill-down completato: 29 successi, 0 errori in 38s                                                                                                                              
+[09/14/26 17:01:05] INFO       ✓ Crawling completato: 29 pagine analizzate in profondità                                                                                                                           
+  ✓ HTMLCollector completato
+  ⠋ Raccolta dati WhoisCollector...
+[09/14/26 17:01:05] INFO     🔍 Raccolta dati Whois/RDAP per passionevo.com...                                                                                                                                     
+[09/14/26 17:01:06] INFO       ✓ RDAP ottenuto (source: rdap.org)                                                                                                                                                  
+                    INFO       ✓ Whois completo: dominio 3.8 anni, registrar: Amazon Registrar, Inc.                                                                                                               
+  ✓ WhoisCollector completato
+  ⠋ Raccolta dati ManualCollector...
+[09/14/26 17:01:06] INFO     🔍 Esecuzione check manuali per https://passionevo.com...                                                                                                                             
+  ✓ ManualCollector completato
+  ⠋ Raccolta dati GEOCollector...
+[09/14/26 17:01:06] INFO     🔍 Analisi GEO/AEO per https://passionevo.com...                                                                                                                                      
+[09/14/26 17:01:07] INFO       ✓ Analisi GEO/AEO completata                                                                                                                                                        
+  ✓ GEOCollector completato
+
+🔍 Verifica dati raccolti
+  ✓ pagespeed: True
+  ✓ gsc: True
+  ✓ ga4: True
+  ✓ html: True
+  ✓ whois: True
+  ✓ manual: True
+  ✓ geo: True
+
+🔄 Fase 2: Elaborazione dati
+  ✓ Righe Audit generate: 84
+  ✓ Righe Checklist generate: 9
+  ✓ Health Score: 84/100
+  ✓ Check PageSpeed trovati: 4
+    - U-01: Core Web Vitals (Mobile) - FAIL
+    - U-02: Lighthouse Performance Score - OK
+    - U-03: Viewport (Responsive) - OK
+    - U-04: AMP (Accelerated Mobile Pages) - INFO
+
+📊 Fase 3: Generazione report
+
+✅ Completato!
+📁 Report salvato in: reports/AuditSEO_passionevo.com_20260914_170107.xlsx
+
+  📊 Statistiche Cache PageSpeed  
+┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ Metrica               ┃ Valore ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ Cache Hits            │ 32     │
+│ Cache Misses          │ 4      │
+│ API Calls Risparmiate │ 32     │
+└───────────────────────┴────────┘

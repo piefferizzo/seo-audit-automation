@@ -31,12 +31,13 @@ SECTION_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="
 SECTION_FONT = Font(bold=True, size=12)
 
 # Larghezze colonne predefinite per tipo di foglio
+# FIX: Checklist ora ha 11 colonne (aggiunta 'Fase').
 COLUMN_WIDTHS = {
     "AUDIT": [10, 12, 30, 8, 10, 50, 40, 40],
-    "Checklist": [5, 15, 30, 12, 50, 50, 15, 8, 40, 30],
+    "Checklist": [5, 15, 25, 12, 40, 12, 45, 15, 8, 35, 25],
     "drilldown": [60, 60, 60, 60],
-    "GA4_Landing": [40, 12, 12, 12, 12, 15, 12],
-    "GA4_Exit": [40, 15, 12, 12, 12],
+    "GA4_Landing": [40, 12, 12, 12, 12, 15],
+    "GA4_Exit": [40, 12, 12, 12, 12],
     "GA4_Geo": [40, 15],
 }
 
@@ -54,7 +55,7 @@ def create_drilldown_dataframe(
         na_row = {col: "N/A" for col in columns}
         na_row[columns[-1]] = empty_message
         return pd.DataFrame([na_row], columns=columns)
-    
+
     return pd.DataFrame(data, columns=columns)
 
 
@@ -77,7 +78,7 @@ def auto_adjust_columns(worksheet, max_width: int = 80):
     for col in worksheet.columns:
         max_length = 0
         column_letter = col[0].column_letter
-        
+
         for cell in col:
             try:
                 cell_len = len(str(cell.value)) if cell.value else 0
@@ -85,7 +86,7 @@ def auto_adjust_columns(worksheet, max_width: int = 80):
                     max_length = cell_len
             except:
                 pass
-        
+
         adjusted_width = min(max_length + 2, max_width)
         worksheet.column_dimensions[column_letter].width = adjusted_width
 
@@ -106,7 +107,7 @@ def apply_state_colors(worksheet, column_index: int, color_map: Dict = None):
     """Applica colori di stato a una colonna specifica."""
     if color_map is None:
         color_map = STATE_COLORS
-    
+
     for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row):
         cell = row[column_index - 1]
         if cell.value in color_map:
@@ -122,7 +123,7 @@ def apply_priority_colors(worksheet, column_index: int, color_map: Dict = None):
     """Applica colori di priorità a una colonna specifica."""
     if color_map is None:
         color_map = PRIORITY_COLORS
-    
+
     for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row):
         cell = row[column_index - 1]
         if cell.value in color_map:
@@ -154,7 +155,7 @@ def extract_drilldown_data(
     data = drilldown.get(key, [])
     if not data:
         return []
-    
+
     result = []
     for item in data:
         row = {}
@@ -162,76 +163,76 @@ def extract_drilldown_data(
             field = field_mapping.get(col, col)
             row[col] = item.get(field, "N/A")
         result.append(row)
-    
+
     return result
 
 
 class ExcelGenerator:
     """Genera il report Excel dell'audit SEO nel formato target."""
-    
+
     def __init__(self):
         self.state_colors = STATE_COLORS
         self.priority_colors = PRIORITY_COLORS
-    
+
     def generate(self, processed_data: Dict, output_path: str, raw_data: Dict = None):
         """Genera il file Excel completo."""
-        
+
         summary = processed_data['summary']
         audit_rows = processed_data['audit']
         checklist_rows = processed_data['checklist']
         drilldown = processed_data.get('drilldown', {})
-        
+
         if raw_data is None:
             raw_data = {}
-        
+
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             # 1. Executive Summary
             self._write_summary(writer, summary, audit_rows)
-            
+
             # 2. AUDIT
             self._write_audit(writer, audit_rows)
-            
+
             # 3. Checklist principale
             self._write_checklist(writer, checklist_rows, audit_rows)
-            
+
             # 4. Fogli drill-down
             self._write_drilldown_sheet(
                 writer, 'HTML - IMG', drilldown, 'images',
                 columns=['URl', 'problem'],
                 field_mapping={'URl': 'url', 'problem': 'problem'}
             )
-            
+
             self._write_drilldown_sheet(
                 writer, 'Title', drilldown, 'titles',
                 columns=['URl', 'meta_title', 'problem'],
                 field_mapping={'URl': 'url', 'meta_title': 'meta_title', 'problem': 'problem'}
             )
-            
+
             self._write_drilldown_sheet(
                 writer, 'Description', drilldown, 'descriptions',
                 columns=['URl', 'meta_description', 'problem'],
                 field_mapping={'URl': 'url', 'meta_description': 'meta_description', 'problem': 'problem'}
             )
-            
+
             self._write_drilldown_sheet(
                 writer, 'HTML - HEADINGS', drilldown, 'headings',
                 columns=['URl', 'h1-1', 'h1-2', 'problem'],
                 field_mapping={'URl': 'url', 'h1-1': 'h1-1', 'h1-2': 'h1-2', 'problem': 'problem'}
             )
-            
+
             # 5. Fogli GA4 avanzati (se raw_data è disponibile)
             ga4_data = raw_data.get('ga4', {})
             if ga4_data:
                 self._write_ga4_landing_pages(writer, ga4_data)
                 self._write_ga4_exit_pages(writer, ga4_data)
                 self._write_ga4_geo(writer, ga4_data)
-            
-            # 6. Consigli generali
-            self._write_consigli(writer)
-        
+
+            # 6. Consigli generali (FIX: ora generati davvero)
+            self._write_consigli(writer, audit_rows)
+
         # Formatta il file
         self._format_excel(output_path)
-    
+
     def _write_drilldown_sheet(
         self,
         writer,
@@ -245,35 +246,43 @@ class ExcelGenerator:
         data = extract_drilldown_data(drilldown, data_key, columns, field_mapping)
         df = create_drilldown_dataframe(data, columns)
         df.to_excel(writer, sheet_name=sheet_name, index=False)
-    
+
     def _write_ga4_landing_pages(self, writer, ga4_data: Dict):
-        """Scrive il foglio GA4 Landing Pages."""
+        """Scrive il foglio GA4 Landing Pages.
+
+        FIX: rimossa colonna 'Conv.' — il collector non raccoglie conversioni,
+        quindi era sempre 0 e fuorviante. Da reintrodurre quando il collector
+        inizierà a raccogliere le conversioni GA4.
+        """
         landing_pages = ga4_data.get('landing_pages', {}).get('landing_pages', [])
-        
+
         if not landing_pages:
-            rows = [{'Pagina': 'N/A', 'Sessioni': 'N/A', 'Utenti': 'N/A', 'Engaged': 'N/A', 'Bounce': 'N/A', 'Durata': 'N/A', 'Conv.': 'N/A'}]
+            rows = [{'Pagina': 'N/A', 'Sessioni': 'N/A', 'Utenti': 'N/A',
+                     'Engaged': 'N/A', 'Bounce': 'N/A', 'Durata': 'N/A'}]
         else:
             rows = []
             for lp in landing_pages[:15]:
                 rows.append({
                     'Pagina': lp.get('page', ''),
                     'Sessioni': lp.get('sessions', 0),
+                    # FIX: il collector ora ritorna la chiave 'users'
+                    # valorizzata con totalUsers (non più sempre 0).
                     'Utenti': lp.get('users', 0),
                     'Engaged': lp.get('engaged_sessions', 0),
                     'Bounce': f"{lp.get('bounce_rate', 0)*100:.1f}%",
                     'Durata': f"{lp.get('avg_duration', 0)/60:.1f}m",
-                    'Conv.': lp.get('conversions', 0)
                 })
-        
+
         df = pd.DataFrame(rows)
         df.to_excel(writer, sheet_name='GA4 Landing Pages', index=False)
-    
+
     def _write_ga4_exit_pages(self, writer, ga4_data: Dict):
         """Scrive il foglio GA4 Exit Pages."""
         exit_pages = ga4_data.get('exit_pages', {}).get('exit_pages', [])
-        
+
         if not exit_pages:
-            rows = [{'Pagina': 'N/A', 'Exits (stima)': 'N/A', 'Views': 'N/A', 'Sessioni': 'N/A', 'Bounce': 'N/A'}]
+            rows = [{'Pagina': 'N/A', 'Exits (stima)': 'N/A', 'Views': 'N/A',
+                     'Sessioni': 'N/A', 'Bounce': 'N/A'}]
         else:
             rows = []
             for ep in exit_pages[:15]:
@@ -284,14 +293,14 @@ class ExcelGenerator:
                     'Sessioni': ep.get('sessions', 0),
                     'Bounce': f"{ep.get('bounce_rate', 0)*100:.1f}%"
                 })
-        
+
         df = pd.DataFrame(rows)
         df.to_excel(writer, sheet_name='GA4 Exit Pages', index=False)
-    
+
     def _write_ga4_geo(self, writer, ga4_data: Dict):
         """Scrive il foglio GA4 Geo Distribution."""
         geo_data = ga4_data.get('geo_distribution', {}).get('geo_distribution', [])
-        
+
         if not geo_data:
             rows = [{'Paese': 'N/A', 'Sessioni': 'N/A'}]
         else:
@@ -301,18 +310,18 @@ class ExcelGenerator:
                     'Paese': geo.get('country', ''),
                     'Sessioni': geo.get('sessions', 0)
                 })
-        
+
         df = pd.DataFrame(rows)
         df.to_excel(writer, sheet_name='GA4 Geo', index=False)
-    
+
     def _write_summary(self, writer, summary: Dict, audit_rows: List[Dict]):
         """Scrive il foglio Executive Summary."""
         by_category = self._group_by_category(audit_rows)
         rows = self._build_summary_rows(summary, by_category)
-        
+
         df = pd.DataFrame(rows, columns=["Metrica", "Dettaglio"])
         df.to_excel(writer, sheet_name="Executive Summary", index=False)
-    
+
     def _group_by_category(self, audit_rows: List[Dict]) -> Dict[str, Dict[str, int]]:
         """Raggruppa i check per categoria e stato."""
         by_category = {}
@@ -322,7 +331,7 @@ class ExcelGenerator:
                 by_category[cat] = {'OK': 0, 'WARN': 0, 'FAIL': 0, 'INFO': 0, 'N/A': 0}
             by_category[cat][row['Stato']] += 1
         return by_category
-    
+
     def _build_summary_rows(self, summary: Dict, by_category: Dict) -> List[List]:
         """Costruisce le righe del summary."""
         rows = [
@@ -344,83 +353,174 @@ class ExcelGenerator:
             ["", ""],
             ["TOP 3 CRITICITÀ", ""],
         ]
-        
+
         top_criticità = summary.get('top_criticita', [])[:3]
         if top_criticità:
             for i, crit in enumerate(top_criticità, 1):
                 rows.append([f"{i}.", f"{crit['Elemento Analizzato']}: {crit['Risultato / Evidenza']}"])
         else:
             rows.append(["", "Nessuna criticità rilevata!"])
-        
+
         rows.extend([
             ["", ""],
             ["TOP PUNTI DI FORZA", ""],
         ])
-        
+
         for i, pf in enumerate(summary.get('top_punti_forza', [])[:3], 1):
             rows.append([f"{i}.", pf['Elemento Analizzato']])
-        
+
         rows.extend([
             ["", ""],
             ["RIPARTIZIONE PER CATEGORIA", ""],
             ["Categoria", "OK / WARN / FAIL / INFO / N/A"],
         ])
-        
+
         for cat, counts in sorted(by_category.items()):
             stats = f"{counts['OK']} / {counts['WARN']} / {counts['FAIL']} / {counts['INFO']} / {counts['N/A']}"
             rows.append([cat, stats])
-        
+
         return rows
-    
+
     def _write_audit(self, writer, audit_rows: List[Dict]):
-        """Scrive il foglio AUDIT."""
-        columns = [
+        """Scrive il foglio AUDIT.
+
+        FIX: gestisce in modo robusto il caso di lista vuota o di righe
+        con chiavi mancanti, usando l'unione di tutte le chiavi presenti.
+        """
+        canonical = [
             "ID Audit", "Categoria", "Elemento Analizzato", "Stato", "Severità",
             "Risultato / Evidenza", "URL / Link Evidenza", "Note Tecniche"
         ]
-        
-        available_columns = [c for c in columns if c in audit_rows[0]] if audit_rows else columns
-        df = pd.DataFrame(audit_rows, columns=available_columns)
+
+        if not audit_rows:
+            df = pd.DataFrame(columns=canonical)
+        else:
+            # Unione delle chiavi presenti in tutte le righe (robusto a
+            # eventuali colonne extra o mancanti in alcune righe).
+            all_keys = set()
+            for row in audit_rows:
+                all_keys.update(row.keys())
+
+            columns = [c for c in canonical if c in all_keys]
+            extra = [k for k in all_keys if k not in columns]
+            columns += sorted(extra)
+
+            df = pd.DataFrame(audit_rows, columns=columns)
+
         df.to_excel(writer, sheet_name="AUDIT", index=False)
-    
+
     def _write_checklist(self, writer, checklist_rows: List[Dict], audit_rows: List[Dict]):
-        """Scrive il foglio Checklist."""
+        """Scrive il foglio Checklist.
+
+        FIX: aggiunta colonna 'Fase' generata da audit_processor ma prima
+        non scritta su Excel. Informativa: aiuta a raggruppare i check per
+        fase operativa (Fondamenta / Architettura / Ottimizzazione).
+        """
         audit_map = {row['ID Audit']: row for row in audit_rows}
-        
+
         rows = []
         for check_num, chk in enumerate(checklist_rows, 1):
             audit_id = chk['Rif. Audit']
             audit_row = audit_map.get(audit_id, {})
-            
+
             rows.append({
                 '#': check_num,
                 'Category': audit_row.get('Categoria', ''),
                 'Activities': audit_row.get('Elemento Analizzato', ''),
-                'Priority (1 alta, 3 bassa)': chk.get('Priorità', 2),
+                'Fase': chk.get('Fase', ''),
                 'Results': audit_row.get('Risultato / Evidenza', ''),
+                'Priority (1 alta, 3 bassa)': chk.get('Priorità', 2),
                 'to do': chk.get('Azione Richiesta', ''),
                 'Owner': chk.get('Owner', ''),
                 'Check': 'FALSE',
                 'Note': audit_row.get('Note Tecniche', ''),
                 'NOTE PF': ''
             })
-        
+
         df = pd.DataFrame(rows)
         df.to_excel(writer, sheet_name='Checklist', index=False)
-    
-    def _write_consigli(self, writer):
-        """Scrive il foglio Consigli generali."""
-        rows = [{
-            'Consigli generali da applicare': 'I consigli strategici verranno generati automaticamente in base ai problemi rilevati dall\'audit.'
-        }]
-        
+
+    def _write_consigli(self, writer, audit_rows: List[Dict]):
+        """Scrive il foglio Consigli generali.
+
+        FIX: ora genera davvero i consigli strategici a partire dai FAIL
+        e WARN dell'audit, raggruppati per categoria e ordinati per
+        priorità (prima i FAIL, poi i WARN).
+        """
+        rows = self._generate_consigli_rows(audit_rows)
         df = pd.DataFrame(rows)
         df.to_excel(writer, sheet_name='Consigli generali', index=False)
-    
+
+    def _generate_consigli_rows(self, audit_rows: List[Dict]) -> List[Dict]:
+        """Genera le righe del foglio Consigli generali dai FAIL/WARN."""
+        # Raggruppa FAIL e WARN per categoria
+        issues_by_cat: Dict[str, List[Dict]] = {}
+        for row in audit_rows:
+            if row.get('Stato') in ('FAIL', 'WARN'):
+                cat = row.get('Categoria', 'Altro')
+                issues_by_cat.setdefault(cat, []).append(row)
+
+        if not issues_by_cat:
+            return [{'Consigli generali da applicare':
+                     '✓ Nessuna criticità rilevata: il sito risulta ben ottimizzato.'}]
+
+        # Ordina le categorie per criticità: prima quelle con FAIL,
+        # poi quelle con solo WARN; a parità, per severità minima.
+        def cat_priority(cat: str):
+            issues = issues_by_cat[cat]
+            has_fail = any(i.get('Stato') == 'FAIL' for i in issues)
+            min_sev = min((i.get('Severità', 3) for i in issues), default=3)
+            return (0 if has_fail else 1, min_sev, cat)
+
+        sorted_cats = sorted(issues_by_cat.keys(), key=cat_priority)
+
+        rows: List[Dict] = []
+        rows.append({'Consigli generali da applicare':
+                     'PRIORITÀ DI INTERVENTO (ordine consigliato)'})
+        rows.append({'Consigli generali da applicare': ''})
+
+        for cat in sorted_cats:
+            issues = issues_by_cat[cat]
+            fails = sorted(
+                [i for i in issues if i.get('Stato') == 'FAIL'],
+                key=lambda x: x.get('Severità', 3)
+            )
+            warns = sorted(
+                [i for i in issues if i.get('Stato') == 'WARN'],
+                key=lambda x: x.get('Severità', 3)
+            )
+
+            header = f"■ {cat}"
+            parts = []
+            if fails:
+                parts.append(f"{len(fails)} FAIL")
+            if warns:
+                parts.append(f"{len(warns)} WARN")
+            if parts:
+                header += " — " + ", ".join(parts)
+            rows.append({'Consigli generali da applicare': header})
+
+            for issue in fails + warns:
+                symbol = '✗' if issue.get('Stato') == 'FAIL' else '⚠'
+                element = issue.get('Elemento Analizzato', '')
+                note = (issue.get('Note Tecniche') or '').strip()
+                if note:
+                    rows.append({
+                        'Consigli generali da applicare': f"  {symbol} {element}: {note}"
+                    })
+                else:
+                    rows.append({
+                        'Consigli generali da applicare': f"  {symbol} {element}"
+                    })
+
+            rows.append({'Consigli generali da applicare': ''})
+
+        return rows
+
     def _format_excel(self, file_path: str):
         """Applica la formattazione al file Excel."""
         wb = load_workbook(file_path)
-        
+
         formatters = {
             "Executive Summary": self._format_summary_sheet,
             "AUDIT": self._format_audit_sheet,
@@ -434,70 +534,84 @@ class ExcelGenerator:
             "GA4 Geo": self._format_ga4_geo_sheet,
             "Consigli generali": self._format_consigli_sheet,
         }
-        
+
         for sheet_name, formatter in formatters.items():
             if sheet_name in wb.sheetnames:
                 formatter(wb[sheet_name])
-        
+
         wb.save(file_path)
-    
+
     def _format_summary_sheet(self, worksheet):
-        """Formatta il foglio Executive Summary."""
+        """Formatta il foglio Executive Summary.
+
+        FIX: rimossa la cella hardcoded 'B7'. Il font del punteggio Health
+        Score viene ora applicato cercando la riga per contenuto, così se
+        la struttura del summary cambia il formato resta corretto.
+        """
         worksheet.column_dimensions['A'].width = 30
         worksheet.column_dimensions['B'].width = 60
-        
-        worksheet['B7'].font = Font(bold=True, size=16, color="0000FF")
-        
-        section_titles = [
+
+        # Trova la riga con "Punteggio Tecnico" e formatta il valore a fianco
+        for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row):
+            if row[0].value == "Punteggio Tecnico" and len(row) >= 2:
+                row[1].font = Font(bold=True, size=16, color="0000FF")
+                break
+
+        section_titles = {
             "DATI CLIENTE", "HEALTH SCORE", "STATISTICHE",
             "TOP 3 CRITICITÀ", "TOP PUNTI DI FORZA",
             "RIPARTIZIONE PER CATEGORIA"
-        ]
-        
+        }
+
         for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row):
             cell_a = row[0]
             if cell_a.value in section_titles:
                 cell_a.font = SECTION_FONT
                 cell_a.fill = SECTION_FILL
-    
+
     def _format_audit_sheet(self, worksheet):
         """Formatta il foglio AUDIT."""
         set_column_widths(worksheet, COLUMN_WIDTHS["AUDIT"])
         apply_header_format(worksheet)
         apply_state_colors(worksheet, column_index=4)
-    
+        # FIX: aggiunto wrap text — le colonne Risultato/Note hanno testi lunghi
+        apply_wrap_text(worksheet)
+
     def _format_checklist_sheet(self, worksheet):
         """Formatta il foglio Checklist."""
         set_column_widths(worksheet, COLUMN_WIDTHS["Checklist"])
         apply_header_format(worksheet)
-        apply_priority_colors(worksheet, column_index=4)
+        # La priorità è ora alla colonna 6 (dopo l'inserimento di 'Fase').
+        apply_priority_colors(worksheet, column_index=6)
         apply_wrap_text(worksheet)
-    
+
     def _format_drilldown_sheet(self, worksheet):
         """Formatta un foglio drill-down generico."""
         apply_header_format(worksheet)
         auto_adjust_columns(worksheet)
         apply_wrap_text(worksheet)
-    
+
     def _format_ga4_landing_sheet(self, worksheet):
         """Formatta il foglio GA4 Landing Pages."""
         set_column_widths(worksheet, COLUMN_WIDTHS["GA4_Landing"])
         apply_header_format(worksheet)
         apply_wrap_text(worksheet)
-    
+
     def _format_ga4_exit_sheet(self, worksheet):
         """Formatta il foglio GA4 Exit Pages."""
         set_column_widths(worksheet, COLUMN_WIDTHS["GA4_Exit"])
         apply_header_format(worksheet)
         apply_wrap_text(worksheet)
-    
+
     def _format_ga4_geo_sheet(self, worksheet):
         """Formatta il foglio GA4 Geo."""
         set_column_widths(worksheet, COLUMN_WIDTHS["GA4_Geo"])
         apply_header_format(worksheet)
         apply_wrap_text(worksheet)
-    
+
     def _format_consigli_sheet(self, worksheet):
         """Formatta il foglio Consigli generali."""
-        worksheet.column_dimensions['A'].width = 100
+        worksheet.column_dimensions['A'].width = 120
         apply_header_format(worksheet)
+        # FIX: aggiunto wrap text: i consigli possono essere lunghi
+        apply_wrap_text(worksheet)

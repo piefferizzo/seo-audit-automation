@@ -1,17 +1,24 @@
 """
 AuditProcessor - versione refattorizzata.
 
-Cambiamenti rispetto all'originale (stessa identica logica di business,
-stessi ID Audit, stesse soglie, stessi testi):
-1. make_audit_row() elimina la duplicazione dello scaffolding a 8 chiavi
-   ripetuta in ~70 check.
-2. classify_threshold() centralizza il pattern ricorrente
-   "> soglia critica -> FAIL, > soglia warning -> WARN, else OK".
-3. La checklist (_generate_checklist) usa una tabella dichiarativa di
-   regole (CHECKLIST_RULES) invece di ~35 tuple con lambda inline.
-4. I log di DEBUG (self.logger.info) sono diventati self.logger.debug,
-   così non inquinano più l'output in produzione ma restano disponibili
-   per il debug del bug dei fogli drill-down.
+FIX APPLICATI:
+
+v2.3.1:
+- GSC-03: corretto bug logico per cui il ramo FAIL (0 URL indicizzate)
+  non era mai raggiungibile.
+- GSC-04: rinominato elemento da "Stima Pagine Indicizzate" a
+  "Pagine con Impression (28 giorni)".
+- Severità FAIL uniformata a 1.
+
+v2.3.2 (Strada A — URL Inspection API reale):
+- GSC-03 e GSC-04 gestiscono tre casi distinti: inspection reale,
+  campo 'indexed' non deprecato, fallback INFO.
+
+v2.3.7 (dedup drilldown):
+- _extract_drilldown_data deduplica le righe di problemi drilldown
+  per chiave composta (URL + problema). Su siti con template ripetuto
+  (logo e immagini footer su ogni pagina), il foglio HTML-IMG passava
+  da ~30 immagini uniche a ~300 righe duplicate. Ora la lista è pulita.
 """
 
 from typing import Dict, Any, List, Optional, Tuple
@@ -22,7 +29,7 @@ from utils.logger import setup_logger
 
 
 # ---------------------------------------------------------------------------
-# HELPER 1 — costruzione riga di audit (elimina lo scaffolding ripetuto)
+# HELPER 1 — costruzione riga di audit
 # ---------------------------------------------------------------------------
 def make_audit_row(
     audit_id: str,
@@ -34,7 +41,6 @@ def make_audit_row(
     url: str = "",
     note: str = "",
 ) -> Dict[str, Any]:
-    """Costruisce una riga di audit con lo schema standard a 8 chiavi."""
     return {
         "ID Audit": audit_id,
         "Categoria": categoria,
@@ -48,12 +54,11 @@ def make_audit_row(
 
 
 # ---------------------------------------------------------------------------
-# HELPER 2 — classificazione a soglie (FAIL/WARN/OK)
+# HELPER 2 — classificazione a soglie
 # ---------------------------------------------------------------------------
 def classify_threshold(
     value: float, critical: float, warning: float, higher_is_worse: bool = True
 ) -> Tuple[str, int]:
-    """Restituisce (stato, severità) confrontando value con due soglie."""
     if higher_is_worse:
         if value > critical:
             return "FAIL", 1
@@ -76,8 +81,32 @@ class AuditProcessor:
             self.config = yaml.safe_load(f)
         self.logger = setup_logger("AuditProcessor")
 
+    # ------------------------------------------------------------------
+    # UTILITY — deduplicazione righe drilldown (FIX v2.3.7)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dedupe_rows(rows: List[Dict], key_fields: List[str]) -> List[Dict]:
+        """Rimuove duplicati da una lista di dict, mantenendo l'ordine.
+
+        La chiave di dedup è composta dai valori dei campi in `key_fields`.
+        Se uno dei campi manca, viene usato stringa vuota.
+
+        Esempio d'uso: righe di problemi immagini duplicate perché la
+        stessa immagine (es. logo, footer banner) compare su ogni pagina.
+        Con la chiave ('url', 'problem') l'immagine + problema viene
+        contata una sola volta, indipendentemente da quante pagine la
+        contengono.
+        """
+        seen = set()
+        result = []
+        for row in rows:
+            key = tuple(str(row.get(f, '')) for f in key_fields)
+            if key not in seen:
+                seen.add(key)
+                result.append(row)
+        return result
+
     def process(self, domain: str, raw_data: Dict[str, Any]) -> Dict[str, List[Dict]]:
-        """Elabora tutti i dati grezzi e genera audit + checklist."""
         self.logger.debug(f"  🔍 DEBUG - Dati ricevuti nel processore:")
         self.logger.debug(f"    - pagespeed: {bool(raw_data.get('pagespeed'))}")
         self.logger.debug(f"    - gsc: {bool(raw_data.get('gsc'))}")
@@ -87,23 +116,19 @@ class AuditProcessor:
 
         audit_rows = []
 
-        # 1. PAGE SPEED
         ps_data = raw_data.get("pagespeed", {})
         if ps_data:
             audit_rows.extend(self._process_pagespeed(ps_data, domain))
 
-        # 2. GOOGLE SEARCH CONSOLE
         gsc_data = raw_data.get("gsc", {})
         if gsc_data:
             audit_rows.extend(self._process_gsc(gsc_data, domain))
 
-        # 3. GOOGLE ANALYTICS 4 (base + avanzati)
         ga4_data = raw_data.get("ga4", {})
         if ga4_data:
             audit_rows.extend(self._process_ga4(ga4_data, domain))
             audit_rows.extend(self._process_ga4_advanced(ga4_data, domain))
 
-        # 4. HTML CRAWLER
         html_data = raw_data.get("html", {})
         if html_data:
             audit_rows.extend(self._process_html(html_data, domain, gsc_data=gsc_data, ps_data=ps_data))
@@ -112,33 +137,24 @@ class AuditProcessor:
             audit_rows.extend(self._process_content_advanced(html_data, domain))
             audit_rows.extend(self._process_favicon_and_images(html_data, domain))
 
-        # 5. WHOIS
         whois_data = raw_data.get("whois", {})
         if whois_data:
             audit_rows.extend(self._process_whois(whois_data, domain))
 
-        # 6. SEMRUSH
         semrush_data = raw_data.get("semrush", {})
         if semrush_data:
             audit_rows.extend(self._process_semrush(semrush_data, domain))
 
-        # 7. MANUAL DATA
         manual_data = raw_data.get("manual", {})
         if manual_data:
             audit_rows.extend(self._process_manual(manual_data, domain))
 
-        # 8. GEO/AEO DATA ← AGGIUNTO!
         geo_data = raw_data.get("geo", {})
         if geo_data:
             audit_rows.extend(self._process_geo(geo_data, domain))
 
-        # 9. GENERA CHECKLIST
         checklist_rows = self._generate_checklist(audit_rows)
-
-        # 10. GENERA EXECUTIVE SUMMARY
         summary = self._generate_summary(domain, audit_rows)
-
-        # 11. ESTRAI DATI DRILL-DOWN
         drilldown_data = self._extract_drilldown_data(html_data)
 
         return {
@@ -147,8 +163,14 @@ class AuditProcessor:
             "summary": summary,
             "drilldown": drilldown_data
         }
+
     def _extract_drilldown_data(self, html_data: Dict) -> Dict[str, List[Dict]]:
-        """Estrae i dati drill-down dal crawler HTML, includendo anche la homepage."""
+        """Estrae i dati drill-down dal crawler HTML, includendo la homepage.
+
+        FIX v2.3.7: deduplica per chiave composta. Su siti con template
+        ripetuto (header/footer con stesso logo e immagini su ogni pagina),
+        prima il foglio HTML-IMG conteneva centinaia di righe duplicate.
+        """
         drilldown = html_data.get('drilldown', {}) if html_data else {}
 
         homepage_problems = self._extract_homepage_problems(html_data)
@@ -157,6 +179,20 @@ class AuditProcessor:
         title_problems = homepage_problems.get('titles', []) + drilldown.get('title_problems', [])
         description_problems = homepage_problems.get('descriptions', []) + drilldown.get('description_problems', [])
         headings_problems = homepage_problems.get('headings', []) + drilldown.get('headings_problems', [])
+
+        # Dedup per chiave composta (fix v2.3.7)
+        images_problems = self._dedupe_rows(images_problems, ['url', 'problem'])
+        title_problems = self._dedupe_rows(title_problems, ['url', 'problem'])
+        description_problems = self._dedupe_rows(description_problems, ['url', 'problem'])
+        headings_problems = self._dedupe_rows(headings_problems, ['url', 'problem'])
+
+        self.logger.debug(
+            f"  🧹 Dedup drilldown — "
+            f"images: {len(images_problems)}, "
+            f"titles: {len(title_problems)}, "
+            f"descriptions: {len(description_problems)}, "
+            f"headings: {len(headings_problems)}"
+        )
 
         return {
             'images': images_problems,
@@ -167,14 +203,12 @@ class AuditProcessor:
         }
 
     def _extract_homepage_problems(self, html_data: Dict) -> Dict[str, List[Dict]]:
-        """Estrae i problemi dalla homepage per popolare i fogli drill-down."""
         homepage = html_data.get('homepage', {}) if html_data else {}
         if not homepage or 'error' in homepage:
             return {'images': [], 'titles': [], 'descriptions': [], 'headings': []}
 
         problems = {'images': [], 'titles': [], 'descriptions': [], 'headings': []}
 
-        # PROBLEMI IMMAGINI
         images = homepage.get('images', [])
         for img in images:
             src = img.get('src', '')
@@ -203,7 +237,6 @@ class AuditProcessor:
             if not width or not height:
                 problems['images'].append({'url': src, 'problem': 'Attributi di dimensione mancanti'})
 
-        # PROBLEMI TITLE
         title = homepage.get('title', '')
         title_len = len(title)
         url = homepage.get('url', '')
@@ -216,7 +249,6 @@ class AuditProcessor:
         else:
             problems['titles'].append({'url': url, 'meta_title': '[MANCANTE]', 'problem': 'Title assente'})
 
-        # PROBLEMI DESCRIPTION
         description = homepage.get('meta_description', '')
         desc_len = len(description)
 
@@ -228,7 +260,6 @@ class AuditProcessor:
         else:
             problems['descriptions'].append({'url': url, 'meta_description': '[MANCANTE]', 'problem': 'Description assente'})
 
-        # PROBLEMI HEADINGS
         headings = homepage.get('headings', {})
         h1_list = headings.get('h1', [])
 
@@ -250,8 +281,10 @@ class AuditProcessor:
 
         return problems
 
+    # ------------------------------------------------------------------
+    # PAGESPEED
+    # ------------------------------------------------------------------
     def _process_pagespeed(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati di Google PageSpeed Insights."""
         rows = []
         mobile = data.get("mobile", {})
         thresholds = self.config["thresholds"]
@@ -282,11 +315,12 @@ class AuditProcessor:
             f"Performance {perf_score:.0f}/100, Accessibility {acc_score:.0f}/100",
             note="Ottimizzazione necessaria" if stato != "OK" else "",
         ))
-
         return rows
 
+    # ------------------------------------------------------------------
+    # GSC
+    # ------------------------------------------------------------------
     def _process_gsc(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati di Google Search Console."""
         rows = []
 
         verification = data.get("verification", "unknown")
@@ -327,7 +361,6 @@ class AuditProcessor:
                 "Il sito potrebbe non avere traffico organico",
             ))
 
-        # GSC-05: Top Pagine per Click
         top_pages = data.get("top_pages", [])
         if top_pages:
             top_3_pages = top_pages[:3]
@@ -336,14 +369,12 @@ class AuditProcessor:
                 page_path = page.get('page', '').replace(domain, '') or '/'
                 clicks = page.get('clicks', 0)
                 parts.append(f"#{i}{page_path}: {clicks} clic")
-
             rows.append(make_audit_row(
                 "GSC-05", "General", "Top Pagine per Click", "OK", 0,
                 ", ".join(parts),
                 "https://search.google.com/search-console/performance",
             ))
 
-        # GSC-06: Top Keyword per Click
         top_queries = data.get("top_queries", [])
         if top_queries:
             top_3_queries = top_queries[:3]
@@ -352,14 +383,12 @@ class AuditProcessor:
                 query_text = query.get('query', '')
                 clicks = query.get('clicks', 0)
                 parts.append(f"#{i} '{query_text}': {clicks} clic")
-
             rows.append(make_audit_row(
                 "GSC-06", "General", "Top Keyword per Click", "OK", 0,
                 ", ".join(parts),
                 "https://search.google.com/search-console/performance",
             ))
 
-        # GSC-07: Distribuzione Posizioni
         position_dist = data.get("position_distribution", {})
         if position_dist and position_dist.get('distribution'):
             dist = position_dist['distribution']
@@ -383,7 +412,6 @@ class AuditProcessor:
                 "Migliorare posizionamento keyword in pagina 2" if stato == "WARN" else "",
             ))
 
-        # GSC-08: Keyword Trend
         trending = data.get("trending_queries", {})
         if trending:
             growing = trending.get('growing', [])
@@ -408,7 +436,6 @@ class AuditProcessor:
                     "Investigare keyword in calo" if len(declining) > 0 else "",
                 ))
 
-        # GSC-09: Dati per Dispositivo
         devices = data.get("devices", {})
         if devices:
             desktop_data = devices.get('DESKTOP', {})
@@ -429,63 +456,104 @@ class AuditProcessor:
                     "Ottimizzare esperienza mobile" if mobile_pct < 50 else "",
                 ))
 
-        # GSC-03: Sitemaps info
+        # GSC-03
         sitemaps_info = data.get("sitemaps", {})
         if sitemaps_info and sitemaps_info.get('found'):
             sitemap_count = sitemaps_info.get('count', 0)
             total_urls = sitemaps_info.get('total_urls', 0)
-            total_indexed = sitemaps_info.get('total_indexed', 0)
 
-            if total_urls > 0:
-                index_rate = (total_indexed / total_urls) * 100
+            inspection = data.get("indexed_estimate", {})
+            if inspection.get('estimation_method') == 'url_inspection_full':
+                indexed = inspection.get('indexed', 0)
+                inspected = inspection.get('total_inspected', 0)
+                index_rate = inspection.get('index_rate', 0)
+                risultato = (
+                    f"{sitemap_count} sitemap, {total_urls} URL inviate, "
+                    f"{indexed}/{inspected} URL ispezionate risultano indicizzate ({index_rate:.1f}%)"
+                )
+                if inspected > 0 and index_rate < 50:
+                    stato, sev = "WARN", 2
+                    note = f"Ispezionate {inspected} URL via URL Inspection API. Tasso di indicizzazione basso."
+                else:
+                    stato, sev, note = "OK", 0, ""
+            elif sitemaps_info.get('indexed_available'):
+                total_indexed = sitemaps_info.get('total_indexed', 0)
+                index_rate = (total_indexed / total_urls * 100) if total_urls > 0 else 0
                 risultato = f"{sitemap_count} sitemap, {total_urls} URL inviate, {total_indexed} URL sitemap indicizzate ({index_rate:.1f}%)"
+                if total_indexed == 0 and total_urls > 0:
+                    stato, sev, note = "FAIL", 1, "Nessuna URL della sitemap indicizzata."
+                elif index_rate < 50:
+                    stato, sev, note = "WARN", 2, "Tasso di indicizzazione basso."
+                else:
+                    stato, sev, note = "OK", 0, ""
             else:
-                index_rate = 0
-                risultato = f"{sitemap_count} sitemap, {total_urls} URL inviate, {total_indexed} URL sitemap indicizzate"
-
-            if total_urls > 0 and index_rate < 50:
-                stato, sev, note = "WARN", 2, "Tasso di indicizzazione basso. Verificare qualità contenuti e struttura interna."
-            elif total_indexed == 0 and total_urls > 0:
-                stato, sev, note = "FAIL", 1, "Nessuna URL della sitemap indicizzata. Problema critico di indicizzazione."
-            else:
-                stato, sev, note = "OK", 0, ""
+                risultato = f"{sitemap_count} sitemap, {total_urls} URL inviate (conteggio indicizzate non disponibile)"
+                stato, sev = "INFO", 0
+                note = (
+                    "Il campo 'indexed' dell'API GSC è deprecato e la URL Inspection API "
+                    "non è accessibile. Verificare su GSC → Indicizzazione → Pagine."
+                )
 
             rows.append(make_audit_row(
                 "GSC-03", "Technical", "Sitemap in GSC", stato, sev, risultato,
                 "https://search.google.com/search-console/sitemaps", note,
             ))
 
-        # GSC-04: Stima pagine totali indicizzate
+        # GSC-04
         indexed_estimate = data.get("indexed_estimate", {})
-        if indexed_estimate and indexed_estimate.get('sample_size', 0) > 0:
+        if indexed_estimate and indexed_estimate.get('estimation_method') == 'url_inspection_full':
+            indexed = indexed_estimate.get('indexed', 0)
+            not_indexed = indexed_estimate.get('not_indexed', 0)
+            inspected = indexed_estimate.get('total_inspected', 0)
+            errors = indexed_estimate.get('errors', 0)
+            index_rate = indexed_estimate.get('index_rate', 0)
+
+            breakdown = indexed_estimate.get('coverage_breakdown', {}) or {}
+            top_states = sorted(breakdown.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            states_str = "; ".join(f"{k}: {v}" for k, v in top_states)
+
+            risultato = (
+                f"{indexed}/{inspected} indicizzate ({index_rate:.1f}%), "
+                f"{not_indexed} non indicizzate, {errors} errori"
+            )
+            note = f"Top coverage states: {states_str}" if states_str else ""
+
+            if inspected > 0 and index_rate >= 70:
+                stato, sev = "OK", 0
+            elif inspected > 0 and index_rate >= 40:
+                stato, sev = "WARN", 2
+            else:
+                stato, sev = "FAIL", 1
+
+            rows.append(make_audit_row(
+                "GSC-04", "Technical", "Indice reale (URL Inspection API)",
+                stato, sev, risultato,
+                "https://search.google.com/search-console/index/coverage",
+                note,
+            ))
+        elif indexed_estimate and indexed_estimate.get('sample_size', 0) > 0:
             sample_size = indexed_estimate.get('sample_size', 0)
             indexed = indexed_estimate.get('indexed', 0)
-            index_rate = indexed_estimate.get('index_rate', 0)
             method = indexed_estimate.get('estimation_method', 'unknown')
             note_base = indexed_estimate.get('note', '')
 
             if method == 'performance_api':
-                risultato = f"Stima: ~{indexed} pagine indicizzate (basato su performance API, {sample_size} pagine con dati)"
-            elif method == 'url_inspection':
-                risultato = f"Stima: ~{indexed} pagine indicizzate (basato su campione di {sample_size} URL, tasso: {index_rate}%)"
+                risultato = f"~{indexed} pagine con impression negli ultimi 28 giorni (campione: {sample_size} URL)"
             else:
                 risultato = "Stima non disponibile"
 
-            if index_rate < 50 and method != 'performance_api':
-                stato, sev = "WARN", 2
-                tech_note = "Tasso di indicizzazione reale basso. Investigare problemi tecnici o di qualità."
-            else:
-                stato, sev = "OK", 0
-                tech_note = note_base
-
             rows.append(make_audit_row(
-                "GSC-04", "Technical", "Stima Pagine Indicizzate", stato, sev, risultato,
-                "https://search.google.com/search-console/index/coverage", tech_note,
+                "GSC-04", "Technical", "Pagine con Impression (28 giorni)",
+                "OK", 0, risultato,
+                "https://search.google.com/search-console/index/coverage", note_base,
             ))
 
         return rows
+
+    # ------------------------------------------------------------------
+    # GA4 base
+    # ------------------------------------------------------------------
     def _process_ga4(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati di Google Analytics 4."""
         rows = []
 
         overview = data.get('overview', {})
@@ -507,7 +575,7 @@ class AuditProcessor:
             avg_duration = engagement.get('avg_session_duration', 0)
 
             if bounce_rate > 70:
-                stato, sev = "FAIL", 2
+                stato, sev = "FAIL", 1
             elif bounce_rate > 50:
                 stato, sev = "WARN", 2
             else:
@@ -562,11 +630,12 @@ class AuditProcessor:
 
         return rows
 
+    # ------------------------------------------------------------------
+    # GA4 advanced
+    # ------------------------------------------------------------------
     def _process_ga4_advanced(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati GA4 avanzati (SEOZoom-like)."""
         rows = []
-        
-        # GA4-06: Top Landing Pages
+
         landing_pages = data.get('landing_pages', {})
         if landing_pages and landing_pages.get('landing_pages'):
             top_landing = landing_pages['landing_pages'][0]
@@ -575,8 +644,7 @@ class AuditProcessor:
                 f"{top_landing['page']} ({top_landing['sessions']} sessioni, {top_landing['bounce_rate']*100:.1f}% bounce)",
                 "https://analytics.google.com/"
             ))
-        
-        # GA4-07: Top Exit Pages
+
         exit_pages = data.get('exit_pages', {})
         if exit_pages and exit_pages.get('exit_pages'):
             top_exit = exit_pages['exit_pages'][0]
@@ -585,15 +653,14 @@ class AuditProcessor:
                 f"{top_exit['page']} ({top_exit['estimated_exits']} exit stimati)",
                 "https://analytics.google.com/"
             ))
-        
-        # GA4-08: Trend Traffico
+
         trend = data.get('traffic_trend', {})
         if trend and trend.get('trend'):
             trend_data = trend['trend']
             if len(trend_data) >= 7:
                 recent_sessions = sum(d['sessions'] for d in trend_data[-7:])
                 previous_sessions = sum(d['sessions'] for d in trend_data[-14:-7]) if len(trend_data) >= 14 else 0
-                
+
                 if previous_sessions > 0:
                     change = ((recent_sessions - previous_sessions) / previous_sessions) * 100
                     if change > 10:
@@ -605,50 +672,47 @@ class AuditProcessor:
                     else:
                         stato, sev = "OK", 0
                         risultato = f"Trend stabile: {change:.1f}% ultimi 7 giorni"
-                    
+
                     rows.append(make_audit_row(
                         "GA4-08", "General", "Trend Traffico Organico", stato, sev,
                         risultato, "https://analytics.google.com/"
                     ))
-        
-        # GA4-09: Variazione Sessioni
+
         comparison = data.get('period_comparison', {})
         if comparison and comparison.get('sessions'):
             sessions_data = comparison['sessions']
             change = sessions_data.get('change_percent', 0)
-            
+
             if change > 10:
                 stato, sev = "OK", 0
             elif change > 0:
                 stato, sev = "INFO", 0
             else:
                 stato, sev = "WARN", 2
-            
+
             rows.append(make_audit_row(
                 "GA4-09", "General", "Variazione Sessioni (vs periodo precedente)", stato, sev,
                 f"{sessions_data['current']} sessioni ({change:+.1f}%)",
                 "https://analytics.google.com/"
             ))
-        
-        # GA4-10: Nuovi vs Ritorno
+
         new_returning = data.get('new_vs_returning', {})
         if new_returning and new_returning.get('new_vs_returning'):
             nr_data = new_returning['new_vs_returning']
             new_sessions = nr_data.get('new', 0)
             returning_sessions = nr_data.get('returning', 0)
             total = new_sessions + returning_sessions
-            
+
             if total > 0:
                 new_pct = (new_sessions / total) * 100
                 returning_pct = (returning_sessions / total) * 100
-                
+
                 rows.append(make_audit_row(
                     "GA4-10", "Content", "Nuovi vs Utenti di Ritorno", "OK", 0,
                     f"Nuovi: {new_pct:.1f}%, Ritorno: {returning_pct:.1f}%",
                     "https://analytics.google.com/"
                 ))
-        
-        # GA4-11: Distribuzione Geografica
+
         geo = data.get('geo_distribution', {})
         if geo and geo.get('geo_distribution'):
             top_country = geo['geo_distribution'][0]
@@ -657,30 +721,31 @@ class AuditProcessor:
                 f"{top_country['country']} ({top_country['sessions']} sessioni)",
                 "https://analytics.google.com/"
             ))
-        
-        # GA4-12: Engaged Sessions
+
         engaged = data.get('engaged_sessions', {})
         if engaged:
             engaged_sessions = engaged.get('engaged_sessions', 0)
             engagement_rate = engaged.get('engagement_rate', 0) * 100
-            
+
             if engagement_rate > 50:
                 stato, sev = "OK", 0
             elif engagement_rate > 30:
                 stato, sev = "INFO", 0
             else:
                 stato, sev = "WARN", 2
-            
+
             rows.append(make_audit_row(
                 "GA4-12", "Usability", "Engaged Sessions", stato, sev,
                 f"{engaged_sessions} sessioni engage ({engagement_rate:.1f}%)",
                 "https://analytics.google.com/"
             ))
-        
+
         return rows
 
+    # ------------------------------------------------------------------
+    # HTML
+    # ------------------------------------------------------------------
     def _process_html(self, data: Dict, domain: str, gsc_data: Dict = None, ps_data: Dict = None) -> List[Dict]:
-        """Processa i dati del crawler HTML."""
         rows = []
         homepage = data.get('homepage', {})
 
@@ -688,6 +753,8 @@ class AuditProcessor:
             return rows
 
         # T-02: Sitemap
+        # FIX v2.3.7: il collector ora popola correttamente 'sitemap'
+        # anche quando trovata via robots.txt (found_via='robots').
         sitemap = data.get('sitemap', {})
 
         if not sitemap.get('exists') and gsc_data and gsc_data.get('sitemaps', {}).get('found'):
@@ -702,6 +769,7 @@ class AuditProcessor:
                     'url_count': gsc_sitemaps.get('total_urls', 0),
                     'found_via': 'gsc',
                     'indexed_count': gsc_sitemaps.get('total_indexed', 0),
+                    'indexed_available': gsc_sitemaps.get('indexed_available', False),
                     'sitemap_count': gsc_sitemaps.get('count', 1)
                 }
 
@@ -710,9 +778,15 @@ class AuditProcessor:
             found_via = sitemap.get('found_via', 'discovery')
             indexed_count = sitemap.get('indexed_count', 0)
             sitemap_count = sitemap.get('sitemap_count', 1)
+            indexed_ok = sitemap.get('indexed_available', True)
 
             if found_via == 'gsc':
-                risultato = f"Presente in GSC ({url_count} URL, {indexed_count} indicizzate, {sitemap_count} sitemap)"
+                if indexed_ok:
+                    risultato = f"Presente in GSC ({url_count} URL, {indexed_count} indicizzate, {sitemap_count} sitemap)"
+                else:
+                    risultato = f"Presente in GSC ({url_count} URL, {sitemap_count} sitemap)"
+            elif found_via == 'robots':
+                risultato = f"Presente (dichiarata in robots.txt, {url_count} URL)"
             else:
                 risultato = f"Presente ({url_count} URL, trovata via {found_via})"
             stato, sev = "OK", 0
@@ -724,7 +798,6 @@ class AuditProcessor:
             "T-02", "Technical", "Sitemap.xml", stato, sev, risultato, sitemap.get('url', ''),
         ))
 
-        # T-03: Robots.txt
         robots = data.get('robots', {})
         sitemap_url = robots.get('sitemap_url', '')
         has_sitemap_ref = robots.get('has_sitemap', False)
@@ -739,7 +812,6 @@ class AuditProcessor:
             "" if has_sitemap_ref else "Aggiungere riferimento alla sitemap",
         ))
 
-        # H-01: Meta Title
         title = homepage.get('title', '')
         title_len = len(title)
 
@@ -759,7 +831,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("H-01", "HTML", "Meta Title", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # H-02: Meta Description
         description = homepage.get('meta_description', '')
         desc_len = len(description)
 
@@ -779,7 +850,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("H-02", "HTML", "Meta Description", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # H-03: Canonical
         canonical = homepage.get('canonical', '')
         rows.append(make_audit_row(
             "H-03", "HTML", "Canonical",
@@ -787,7 +857,6 @@ class AuditProcessor:
             "Presente" if canonical else "Mancante", homepage.get('url', ''),
         ))
 
-        # H-04: Headings (H1)
         headings = homepage.get('headings', {})
         h1_count = len(headings.get('h1', []))
         rows.append(make_audit_row(
@@ -798,7 +867,6 @@ class AuditProcessor:
             "Ottimizzare con keyword target" if h1_count != 1 else "",
         ))
 
-        # H-05: Images Alt Tag
         images = homepage.get('images', [])
         total_images = len(images)
         images_without_alt = len([img for img in images if not img.get('alt')])
@@ -813,23 +881,21 @@ class AuditProcessor:
             risultato = f"{images_without_alt}/{total_images} immagini senza alt ({alt_percentage:.1f}%)"
             note = "Correzione minore, ma utile per accessibilità"
         else:
-            stato, sev = "FAIL", 2
+            stato, sev = "FAIL", 1
             risultato = f"{images_without_alt}/{total_images} immagini senza alt ({alt_percentage:.1f}%)"
             note = "Aggiungere alt text descrittivi"
 
         rows.append(make_audit_row("H-05", "HTML", "Images Alt Tag", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # H-06: Structured Data
         structured_data = homepage.get('structured_data', [])
         rows.append(make_audit_row(
             "H-06", "HTML", "Structured Data (Schema.org)",
-            "OK" if structured_data else "FAIL", 0 if structured_data else 2,
+            "OK" if structured_data else "FAIL", 0 if structured_data else 1,
             f"{len(structured_data)} blocchi presenti" if structured_data else "Non presenti",
             homepage.get('url', ''),
             "Implementare markup Schema.org" if not structured_data else "",
         ))
 
-        # H-07: Open Graph
         og_tags = homepage.get('og_tags', {})
         rows.append(make_audit_row(
             "H-07", "HTML", "Open Graph",
@@ -838,7 +904,6 @@ class AuditProcessor:
             homepage.get('url', ''),
         ))
 
-        # H-08: Hreflang
         hreflang = homepage.get('hreflang', [])
         lang = homepage.get('lang', '')
         valid_hreflang = [h for h in hreflang if h.get('href')]
@@ -854,7 +919,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("H-08", "HTML", "Hreflang", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # U-03: Viewport
         viewport = homepage.get('viewport', '')
         rows.append(make_audit_row(
             "U-03", "Usability", "Viewport (Responsive)",
@@ -862,23 +926,20 @@ class AuditProcessor:
             "Presente" if viewport else "Mancante", homepage.get('url', ''),
         ))
 
-        # H-09: 404 Custom
         check_404 = data.get('404', {})
         rows.append(make_audit_row(
             "H-09", "HTML", "404 Custom Page",
-            "OK" if check_404.get('is_custom') else "FAIL", 0 if check_404.get('is_custom') else 2,
+            "OK" if check_404.get('is_custom') else "FAIL", 0 if check_404.get('is_custom') else 1,
             "Presente" if check_404.get('is_custom') else "Non presente o generica", "",
             "Creare pagina 404 personalizzata" if not check_404.get('is_custom') else "",
         ))
 
-        # H-10: Content Language
         rows.append(make_audit_row(
             "H-10", "HTML", "Content Language",
             "OK" if lang else "WARN", 0 if lang else 2,
             f"Lang: {lang}" if lang else "Non impostato", homepage.get('url', ''),
         ))
 
-        # T-04: Internal Links
         internal_links = homepage.get('internal_links', [])
         rows.append(make_audit_row(
             "T-04", "Technical", "Internal Links",
@@ -886,7 +947,6 @@ class AuditProcessor:
             f"{len(internal_links)} link interni trovati", homepage.get('url', ''),
         ))
 
-        # C-01: Word Count
         word_count = homepage.get('word_count', 0)
         rows.append(make_audit_row(
             "C-01", "Content", "Content Length",
@@ -895,7 +955,6 @@ class AuditProcessor:
             "Aumentare contenuto" if word_count < 300 else "",
         ))
 
-        # T-05: Breadcrumbs
         breadcrumbs = data.get('breadcrumbs', {})
         site_levels = data.get('site_structure', {}).get('levels', 0)
 
@@ -906,12 +965,11 @@ class AuditProcessor:
             risultato = f"Non presenti (struttura semplice: {site_levels} livelli)"
             note = "Non critici per siti con struttura piatta"
         else:
-            stato, sev, risultato = "FAIL", 2, "Non presenti"
+            stato, sev, risultato = "FAIL", 1, "Non presenti"
             note = "Implementare breadcrumbs per migliorare UX e SEO"
 
         rows.append(make_audit_row("T-05", "Technical", "Breadcrumbs", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # T-06: HTTP to HTTPS Redirect
         redirect = data.get('redirect', {})
         http_to_https = redirect.get('http_to_https', {})
         https_present = data.get('https_present', True)
@@ -928,7 +986,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("T-06", "Technical", "HTTP to HTTPS Redirect", stato, sev, risultato, "", note))
 
-        # H-11: Image Weight
         image_analysis = data.get('image_analysis', {})
         heavy_images = image_analysis.get('heavy_images', [])
         rows.append(make_audit_row(
@@ -939,7 +996,6 @@ class AuditProcessor:
             "Ottimizzare peso immagini (WebP, compressione)" if heavy_images else "",
         ))
 
-        # T-07: Anchor Text
         anchor_text = data.get('anchor_text', {})
         generic_count = anchor_text.get('generic_anchors', 0)
         rows.append(make_audit_row(
@@ -950,7 +1006,6 @@ class AuditProcessor:
             "Ottimizzare anchor text con keyword descrittive" if generic_count > 0 else "",
         ))
 
-        # T-08: URL Structure
         url_structure = data.get('url_structure', {})
         deep_links = url_structure.get('deep_links', 0)
         rows.append(make_audit_row(
@@ -960,7 +1015,6 @@ class AuditProcessor:
             "Ridurre profondità URL per migliorare crawling" if deep_links >= 5 else "",
         ))
 
-        # H-12: HTML5 Doctype
         html5 = data.get('html5', {})
         rows.append(make_audit_row(
             "H-12", "HTML", "HTML5 Doctype",
@@ -969,7 +1023,6 @@ class AuditProcessor:
             homepage.get('url', ''),
         ))
 
-        # H-13: Logo
         logo = data.get('logo', {})
         rows.append(make_audit_row(
             "H-13", "HTML", "Logo Optimization",
@@ -980,14 +1033,12 @@ class AuditProcessor:
         return rows
 
     def _process_advanced_html(self, data: Dict, domain: str, ps_data: Dict = None) -> List[Dict]:
-        """Processa i dati avanzati del crawler HTML."""
         rows = []
         homepage = data.get('homepage', {})
 
         if not homepage or 'error' in homepage:
             return rows
 
-        # C-02: Duplicate Content
         duplicate_content = data.get('duplicate_content', {})
         rows.append(make_audit_row(
             "C-02", "Content", "Duplicate Content",
@@ -998,7 +1049,6 @@ class AuditProcessor:
             "Rimuovere o canonicalizzare contenuti duplicati" if duplicate_content.get('has_duplicates') else "",
         ))
 
-        # T-09: CSS/JS Analysis
         css_js = data.get('css_js_analysis', {})
         total_files = css_js.get('total_css_js', 0)
         rows.append(make_audit_row(
@@ -1009,7 +1059,6 @@ class AuditProcessor:
             "Minificare e combinare file CSS/JS" if total_files >= 20 else "",
         ))
 
-        # H-14: Pagination
         pagination = data.get('pagination', {})
         internal_pages_count = len(data.get('internal_pages', []))
 
@@ -1024,7 +1073,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("H-14", "HTML", "Pagination", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # T-10: Site Structure
         site_structure = data.get('site_structure', {})
         levels = site_structure.get('levels', 0)
         rows.append(make_audit_row(
@@ -1034,7 +1082,6 @@ class AuditProcessor:
             "Ridurre profondità struttura" if levels > 3 else "",
         ))
 
-        # U-04: AMP
         amp = data.get('amp_check', {})
         rows.append(make_audit_row(
             "U-04", "Usability", "AMP (Accelerated Mobile Pages)",
@@ -1043,7 +1090,6 @@ class AuditProcessor:
             homepage.get('url', ''),
         ))
 
-        # T-11: CDN
         cdn = data.get('cdn_check', {})
         lcp = 0
         if ps_data and ps_data.get('mobile'):
@@ -1062,7 +1108,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("T-11", "Technical", "CDN (Content Delivery Network)", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # H-15: Image Dimensions
         image_dims = data.get('image_dimensions', {})
         without_dims = image_dims.get('without_dimensions', 0)
         total_images = image_dims.get('total_images', 0)
@@ -1083,21 +1128,18 @@ class AuditProcessor:
         return rows
 
     def _process_advanced_technical(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i check tecnici avanzati."""
         rows = []
         homepage = data.get('homepage', {})
 
         if not homepage or 'error' in homepage:
             return rows
 
-        # T-12: Crawling Errors
         rows.append(make_audit_row(
             "T-12", "Technical", "Crawling Errors", "OK", 0,
             "Nessun errore critico rilevato",
             "https://search.google.com/search-console/index/coverage",
         ))
 
-        # T-13: Indexability Analysis
         indexability = data.get('indexability', {})
         if indexability:
             noindex = indexability.get('noindex', False)
@@ -1115,7 +1157,6 @@ class AuditProcessor:
                 "Rimuovere noindex" if noindex else ("Correggere canonical" if not canonical_correct else ""),
             ))
 
-        # T-14: HTTP Headers
         http_headers = data.get('http_headers', {})
         if http_headers:
             has_security = http_headers.get('has_security_headers', False)
@@ -1127,7 +1168,6 @@ class AuditProcessor:
                 "Aggiungere X-Frame-Options, HSTS" if not has_security else "",
             ))
 
-        # T-15: Status Codes
         status_codes = data.get('status_codes', {})
         if status_codes:
             page_status = status_codes.get('page_status', 0)
@@ -1145,7 +1185,6 @@ class AuditProcessor:
                 "Correggere risorse rotte" if broken > 0 else "",
             ))
 
-        # T-16: www vs non-www Redirect
         www_redirect = data.get('www_redirect', {})
         if www_redirect:
             consistent = www_redirect.get('consistent', False)
@@ -1156,7 +1195,6 @@ class AuditProcessor:
                 "Configurare redirect 301 coerente" if not consistent else "",
             ))
 
-        # T-17: Mixed Content
         mixed_content = data.get('mixed_content', {})
         if mixed_content:
             has_mixed = mixed_content.get('has_mixed_content', False)
@@ -1169,7 +1207,6 @@ class AuditProcessor:
                 "Aggiornare risorse a HTTPS" if has_mixed else "",
             ))
 
-        # T-18: Redirect Chains
         redirect_chains = data.get('redirect_chains', {})
         if redirect_chains:
             has_chain = redirect_chains.get('has_chain', False)
@@ -1182,7 +1219,6 @@ class AuditProcessor:
                 "Semplificare redirect a singolo hop" if has_chain else "",
             ))
 
-        # T-19: CSS Issues
         css_issues = data.get('css_issues', {})
         if css_issues:
             too_many = css_issues.get('too_many_files', False)
@@ -1195,7 +1231,6 @@ class AuditProcessor:
                 "Combinare e minificare CSS" if too_many else "",
             ))
 
-        # T-20: JS Issues
         js_issues = data.get('js_issues', {})
         if js_issues:
             too_many = js_issues.get('too_many_files', False)
@@ -1208,7 +1243,6 @@ class AuditProcessor:
                 "Deferire o caricare async JS" if too_many else "",
             ))
 
-        # T-21: Subdomains
         subdomains = data.get('subdomains', {})
         if subdomains:
             has_subdomains = subdomains.get('has_subdomains', False)
@@ -1222,7 +1256,6 @@ class AuditProcessor:
         return rows
 
     def _process_content_advanced(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa l'analisi avanzata dei contenuti."""
         rows = []
         homepage = data.get('homepage', {})
 
@@ -1232,7 +1265,6 @@ class AuditProcessor:
         site_type = data.get('site_type', 'corporate')
         content_quality = data.get('content_quality', {})
 
-        # C-03: Focus Keyword in Title
         if content_quality:
             keyword_in_title = content_quality.get('keyword_in_title', False)
             rows.append(make_audit_row(
@@ -1243,7 +1275,6 @@ class AuditProcessor:
                 "Includere keyword principale nel title" if not keyword_in_title else "",
             ))
 
-            # C-04: Focus Keyword in H1
             keyword_in_h1 = content_quality.get('keyword_in_h1', False)
             rows.append(make_audit_row(
                 "C-04", "Content", "Focus Keyword in H1",
@@ -1253,7 +1284,6 @@ class AuditProcessor:
                 "Includere keyword principale nell'H1" if not keyword_in_h1 else "",
             ))
 
-            # C-05: Keyword Density
             density = content_quality.get('keyword_density', 0)
             if density == 0:
                 stato, sev, risultato, note = "WARN", 2, "Densità keyword non calcolabile", "Verificare presenza keyword nel contenuto"
@@ -1270,7 +1300,6 @@ class AuditProcessor:
 
             rows.append(make_audit_row("C-05", "Content", "Keyword Density", stato, sev, risultato, homepage.get('url', ''), note))
 
-            # C-06: Readability Score
             readability = content_quality.get('readability_score', 0)
             if readability >= 70:
                 stato, sev, risultato = "OK", 0, f"Readability: {readability}/100 (ottima)"
@@ -1284,7 +1313,6 @@ class AuditProcessor:
                 "Migliorare leggibilità con frasi più corte" if readability < 50 else "",
             ))
 
-        # C-07: Doorway Pages Detection
         doorway = data.get('doorway_pages', {})
         if doorway:
             is_doorway = doorway.get('is_doorway', False)
@@ -1299,7 +1327,6 @@ class AuditProcessor:
 
             rows.append(make_audit_row("C-07", "Content", "Doorway Pages Detection", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # C-08: Content Uniqueness
         uniqueness = data.get('content_uniqueness', {})
         if uniqueness:
             is_unique = uniqueness.get('unique', True)
@@ -1317,7 +1344,6 @@ class AuditProcessor:
 
             rows.append(make_audit_row("C-08", "Content", "Content Uniqueness", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # C-09: Content Freshness
         freshness = data.get('content_freshness', {})
         if freshness:
             has_date = freshness.get('has_date', False)
@@ -1336,14 +1362,12 @@ class AuditProcessor:
         return rows
 
     def _process_favicon_and_images(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i check su favicon e image SEO."""
         rows = []
         homepage = data.get('homepage', {})
 
         if not homepage or 'error' in homepage:
             return rows
 
-        # H-16: Favicon
         favicon = data.get('favicon', {})
         if favicon:
             has_favicon = favicon.get('has_favicon', False)
@@ -1356,17 +1380,15 @@ class AuditProcessor:
                 risultato = f"Favicon presente ({len(favicon_urls)} varianti: {', '.join(types) if types else 'N/A'})"
                 note = "" if has_apple_touch else "Consigliato aggiungere apple-touch-icon per dispositivi iOS"
             else:
-                stato, sev, risultato = "FAIL", 2, "Favicon non trovata"
+                stato, sev, risultato = "FAIL", 1, "Favicon non trovata"
                 note = "Aggiungere favicon per migliorare UX e branding"
 
             rows.append(make_audit_row("H-16", "HTML", "Favicon", stato, sev, risultato, homepage.get('url', ''), note))
 
-        # H-17: Image Index (SEO Optimization)
         images = homepage.get('images', [])
         if images:
             images_with_alt = sum(1 for img in images if img.get('alt', '').strip())
             images_with_dimensions = sum(1 for img in images if img.get('width') and img.get('height'))
-
             modern_formats = sum(1 for img in images if img.get('src', '').lower().endswith(('.webp', '.avif')))
 
             total = len(images)
@@ -1394,7 +1416,6 @@ class AuditProcessor:
         return rows
 
     def _process_whois(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati Whois del dominio."""
         rows = []
 
         if data.get('error'):
@@ -1405,7 +1426,6 @@ class AuditProcessor:
             ))
             return rows
 
-        # T-22: Domain Age
         age_years = data.get('age_years', 0)
         age_days = data.get('age_days', 0)
         creation_date = data.get('creation_date')
@@ -1422,7 +1442,6 @@ class AuditProcessor:
 
         rows.append(make_audit_row("T-22", "Technical", "Domain Age", stato, sev, risultato))
 
-        # T-23: Domain Expiration
         days_to_expiry = data.get('days_to_expiry', 0)
         expiration_date = data.get('expiration_date')
         expiry_str = expiration_date.strftime('%Y-%m-%d') if expiration_date else 'N/A'
@@ -1441,12 +1460,10 @@ class AuditProcessor:
             "Rinnovare il dominio" if 0 < days_to_expiry < 90 else "",
         ))
 
-        # T-24: Registrar
         registrar = data.get('registrar', '')
         if registrar:
             rows.append(make_audit_row("T-24", "Technical", "Domain Registrar", "OK", 0, f"Registrar: {registrar}"))
 
-        # T-25: Name Servers
         name_servers = data.get('name_servers', [])
         if name_servers:
             rows.append(make_audit_row(
@@ -1454,12 +1471,10 @@ class AuditProcessor:
                 f"{len(name_servers)} nameserver configurati", note=", ".join(name_servers[:3]),
             ))
 
-        # T-26: IP Address
         ip_address = data.get('ip_address', '')
         if ip_address:
             rows.append(make_audit_row("T-26", "Technical", "IP Address", "OK", 0, f"IP: {ip_address}"))
 
-        # T-27: DNSSEC
         dnssec = data.get('dnssec', '')
         if dnssec:
             dnssec_active = str(dnssec).lower() in ['signed', 'true', 'yes', '1']
@@ -1472,7 +1487,6 @@ class AuditProcessor:
         return rows
 
     def _process_semrush(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati di Semrush."""
         rows = []
 
         rows.append(make_audit_row(
@@ -1491,7 +1505,6 @@ class AuditProcessor:
         return rows
 
     def _process_manual(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati manuali/semi-automatici."""
         rows = []
 
         https_present = data.get("https_present", False)
@@ -1527,41 +1540,38 @@ class AuditProcessor:
         return rows
 
     def _process_geo(self, data: Dict, domain: str) -> List[Dict]:
-        """Processa i dati GEO/AEO."""
         rows = []
-        
-        # GEO-01: Schema Markup Validation
+
         schema_validation = data.get('schema_validation', {})
         if schema_validation:
             completeness = schema_validation.get('completeness_score', 0)
             total_schemas = schema_validation.get('total_schemas', 0)
-            
+
             if completeness >= 70:
                 stato, sev = "OK", 0
             elif completeness >= 40:
                 stato, sev = "WARN", 2
             else:
                 stato, sev = "FAIL", 1
-            
+
             rows.append(make_audit_row(
                 "GEO-01", "GEO", "Schema Markup Completeness", stato, sev,
                 f"{completeness}% completo ({total_schemas} schemi trovati)",
                 domain,
                 "Implementare JSON-LD per Organization, Article, FAQPage" if completeness < 70 else ""
             ))
-        
-        # GEO-02: AI Readability Score
+
         ai_readability = data.get('ai_readability', {})
         if ai_readability:
             score = ai_readability.get('readability_score', 0)
-            
+
             if score >= 70:
                 stato, sev = "OK", 0
             elif score >= 40:
                 stato, sev = "WARN", 2
             else:
                 stato, sev = "FAIL", 1
-            
+
             rows.append(make_audit_row(
                 "GEO-02", "GEO", "AI Readability Score", stato, sev,
                 f"{score}/100 (Direct answer: {'✓' if ai_readability.get('has_direct_answer') else '✗'}, "
@@ -1570,19 +1580,18 @@ class AuditProcessor:
                 domain,
                 "Migliorare struttura per AI Overviews e featured snippets" if score < 70 else ""
             ))
-        
-        # GEO-03: Citation Potential
+
         citation = data.get('citation_potential', {})
         if citation:
             score = citation.get('citation_score', 0)
-            
+
             if score >= 70:
                 stato, sev = "OK", 0
             elif score >= 40:
                 stato, sev = "WARN", 2
             else:
                 stato, sev = "FAIL", 1
-            
+
             factors = citation.get('factors', {})
             rows.append(make_audit_row(
                 "GEO-03", "GEO", "Citation Potential", stato, sev,
@@ -1593,20 +1602,19 @@ class AuditProcessor:
                 domain,
                 "Migliorare autorevolezza e unicità del contenuto" if score < 70 else ""
             ))
-        
-        # GEO-04: Content Structure
+
         structure = data.get('content_structure', {})
         if structure:
             h1_count = structure.get('h1_count', 0)
             h2_count = structure.get('h2_count', 0)
-            
+
             if h1_count == 1 and h2_count >= 3:
                 stato, sev = "OK", 0
             elif h1_count >= 1 and h2_count >= 2:
                 stato, sev = "WARN", 2
             else:
                 stato, sev = "FAIL", 1
-            
+
             rows.append(make_audit_row(
                 "GEO-04", "GEO", "Content Structure for GEO", stato, sev,
                 f"H1: {h1_count}, H2: {h2_count}, H3: {structure.get('h3_count', 0)}, "
@@ -1614,15 +1622,12 @@ class AuditProcessor:
                 domain,
                 "Ottimizzare struttura headings per motori AI" if stato != "OK" else ""
             ))
-        
+
         return rows
 
     # ------------------------------------------------------------------
-    # CHECKLIST — tabella dichiarativa invece di ~35 tuple con lambda
+    # CHECKLIST
     # ------------------------------------------------------------------
-    # Ogni regola: quando l'ID Audit vale audit_id E lo Stato è tra
-    # trigger_stati, genera questa azione in checklist. Stessa logica
-    # dell'originale, ma leggibile e modificabile senza toccare codice.
     CHECKLIST_RULES: List[Dict[str, Any]] = [
         {"audit_id": "U-01", "trigger_stati": ["FAIL"], "fase": "3. Ottimizzazione", "azione": "Ottimizzare Core Web Vitals (rimuovere JS/CSS inutilizzati)", "owner": "Sviluppo", "kpi": "LCP < 2.5s, Performance > 80"},
         {"audit_id": "U-02", "trigger_stati": ["FAIL"], "fase": "3. Ottimizzazione", "azione": "Migliorare Lighthouse Performance Score", "owner": "Sviluppo", "kpi": "Performance > 80/100"},
@@ -1662,13 +1667,9 @@ class AuditProcessor:
     ]
 
     def _generate_checklist(self, audit_rows: List[Dict]) -> List[Dict]:
-        """Genera la checklist operativa - ESCLUDE INFO e N/A."""
         checklist = []
         chk_id = 1
 
-        # Indicizza le regole per ID Audit per un lookup O(1) invece di
-        # scorrere tutte le regole per ogni riga (l'originale scorreva
-        # linearmente ~35 regole per ognuna delle ~70 righe di audit).
         rules_by_audit_id: Dict[str, List[Dict]] = {}
         category_rules: List[Dict] = []
         for rule in self.CHECKLIST_RULES:
@@ -1710,9 +1711,7 @@ class AuditProcessor:
 
         return checklist
 
-
     def _generate_summary(self, domain: str, audit_rows: List[Dict]) -> Dict:
-        """Genera l'Executive Summary."""
         total = len(audit_rows)
         fails = sum(1 for r in audit_rows if r["Stato"] == "FAIL")
         warns = sum(1 for r in audit_rows if r["Stato"] == "WARN")
@@ -1728,7 +1727,6 @@ class AuditProcessor:
             weighted_score = (oks * 1.0 + warns * 0.5 + fails * 0.0) / relevant_checks
             health_score = round(weighted_score * 100)
 
-        # Top criticità - evita duplicati per elemento
         seen_crit = set()
         top_criticita = []
         for r in sorted(
@@ -1743,7 +1741,6 @@ class AuditProcessor:
                 if len(top_criticita) >= 3:
                     break
 
-        # Top punti di forza - evita duplicati per elemento
         seen_pf = set()
         top_punti_forza = []
         for r in audit_rows:
@@ -1758,7 +1755,7 @@ class AuditProcessor:
         return {
             "domain": domain,
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "version": "2.3 Indexed Pages Estimate",
+            "version": "2.3.7 Drilldown Dedup",
             "health_score": health_score,
             "total_checks": total,
             "fails": fails,

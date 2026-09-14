@@ -1,0 +1,104 @@
+╭─────────────────────────────────────────────────────────────────────────────────────────────────── Audit SEO ───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ 🚀 SEO Audit Automation Tool                                                                                                                                                                                    │
+│                                                                                                                                                                                                                 │
+│   Dominio: https://arkys.agency                                                                                                                                                                                 │
+│   Data: 2026-09-14 16:24:38                                                                                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+📦 Fase 1: Raccolta dati
+  ⠋ Raccolta dati PageSpeedCollector...
+[09/14/26 16:24:38] INFO     🔍 Raccolta dati PageSpeed per https://arkys.agency...                                                                                                                                
+                    INFO     ✅ Cache HIT per https://arkys.agency (mobile)                                                                                                                                        
+                    INFO     ✅ Cache HIT per https://arkys.agency (desktop)                                                                                                                                       
+  ✓ PageSpeedCollector completato
+  ⠋ Raccolta dati GSCCollector...
+[09/14/26 16:24:38] INFO     🔍 Raccolta dati GSC per https://arkys.agency...                                                                                                                                      
+[09/14/26 16:24:40] INFO       ✓ Proprietà trovata per arkys.agency: https://arkys.agency/                                                                                                                         
+                    INFO       ✓ Accesso GSC confermato per https://arkys.agency/: siteOwner                                                                                                                       
+[09/14/26 16:24:41] INFO       ✓ Top 10 pagine estratte                                                                                                                                                            
+                    INFO       ✓ Top 10 keyword estratte                                                                                                                                                           
+                    INFO       ✓ Dati dispositivo estratti: ['MOBILE', 'DESKTOP', 'TABLET']                                                                                                                        
+[09/14/26 16:24:42] INFO       ✓ Trend keyword estratti: 4 crescono, 2 calano, 6 nuove                                                                                                                             
+                    INFO       ✓ Distribuzione posizioni estratta: 956 keyword totali                                                                                                                              
+                    INFO       🔍 Recupero informazioni sitemap da GSC...                                                                                                                                          
+[09/14/26 16:24:43] INFO       ✓ Trovate 1 sitemap in GSC                                                                                                                                                          
+                    INFO       🔍 Stima pagine indicizzate (URL Inspection API)...                                                                                                                                 
+[09/14/26 16:24:58] INFO       ✓ Estratti 133 URL dalle sitemap                                                                                                                                                    
+                    INFO         🚀 Ispeziono 0 URL con 5 worker (133 da cache)                                                                                                                                    
+                    INFO       ✅ Ispezione completata: 54 indicizzate, 79 non indicizzate, 0 errori (0.0s, 133 da cache)                                                                                          
+                    INFO       ✓ Trovate 56 pagine con dati performance                                                                                                                                            
+  ✓ GSCCollector completato
+  ⠋ Raccolta dati GA4Collector...
+[09/14/26 16:24:58] INFO     🔍 Raccolta dati GA4 per https://arkys.agency...                                                                                                                                      
+[09/14/26 16:25:09] INFO       ✓ Dati GA4 raccolti per property 299844895                                                                                                                                          
+  ✓ GA4Collector completato
+  ⠋ Raccolta dati HTMLCollector...
+[09/14/26 16:25:09] INFO     🔍 Crawling HTML avanzato per https://arkys.agency...                                                                                                                                 
+[09/14/26 16:25:10] INFO       ✓ robots.txt trovato, sitemap dichiarata: https://arkys.agency/sitemap_index.xml                                                                                                    
+[09/14/26 16:25:17] INFO       📋 Raccolta URL per drill-down...                                                                                                                                                   
+                    INFO       📖 Tentativo download sitemap da robots.txt: https://arkys.agency/sitemap_index.xml                                                                                                 
+[09/14/26 16:25:25] INFO       ✓ Trovate 133 URL dalla sitemap (robots.txt)                                                                                                                                        
+                    INFO       🎯 URL da analizzare (limite 200): 136                                                                                                                                              
+                    INFO       🔍 Avvio crawling drill-down...                                                                                                                                                     
+                    INFO       📊 Analisi drill-down: 1/136 pagine (0s, ETA 0s)                                                                                                                                    
+[09/14/26 16:25:35] INFO       📊 Analisi drill-down: 10/136 pagine (10s, ETA 128s)                                                                                                                                
+[09/14/26 16:25:46] INFO       📊 Analisi drill-down: 20/136 pagine (21s, ETA 122s)                                                                                                                                
+[09/14/26 16:25:57] INFO       📊 Analisi drill-down: 30/136 pagine (32s, ETA 113s)                                                                                                                                
+[09/14/26 16:26:08] INFO       📊 Analisi drill-down: 40/136 pagine (43s, ETA 103s)                                                                                                                                
+[09/14/26 16:26:19] INFO       📊 Analisi drill-down: 50/136 pagine (53s, ETA 92s)                                                                                                                                 
+[09/14/26 16:26:29] INFO       📊 Analisi drill-down: 60/136 pagine (64s, ETA 81s)                                                                                                                                 
+[09/14/26 16:26:40] INFO       📊 Analisi drill-down: 70/136 pagine (75s, ETA 71s)                                                                                                                                 
+[09/14/26 16:26:51] INFO       📊 Analisi drill-down: 80/136 pagine (86s, ETA 60s)                                                                                                                                 
+[09/14/26 16:27:02] INFO       📊 Analisi drill-down: 90/136 pagine (97s, ETA 49s)                                                                                                                                 
+[09/14/26 16:27:13] INFO       📊 Analisi drill-down: 100/136 pagine (108s, ETA 39s)                                                                                                                               
+[09/14/26 16:27:23] INFO       📊 Analisi drill-down: 110/136 pagine (118s, ETA 28s)                                                                                                                               
+[09/14/26 16:27:34] INFO       📊 Analisi drill-down: 120/136 pagine (129s, ETA 17s)                                                                                                                               
+[09/14/26 16:27:45] INFO       📊 Analisi drill-down: 130/136 pagine (140s, ETA 6s)                                                                                                                                
+[09/14/26 16:27:57] INFO       ✅ Drill-down completato: 136 successi, 0 errori in 152s                                                                                                                            
+[09/14/26 16:28:01] INFO       ✓ Crawling completato: 136 pagine analizzate in profondità                                                                                                                          
+  ✓ HTMLCollector completato
+  ⠋ Raccolta dati WhoisCollector...
+[09/14/26 16:28:01] INFO     🔍 Raccolta dati Whois/RDAP per arkys.agency...                                                                                                                                       
+[09/14/26 16:28:02] INFO       ✓ RDAP ottenuto (source: rdap.org)                                                                                                                                                  
+                    INFO       ✓ Whois completo: dominio 5.8 anni, registrar: TLD Registrar Solutions Ltd.                                                                                                         
+  ✓ WhoisCollector completato
+  ⠋ Raccolta dati ManualCollector...
+[09/14/26 16:28:02] INFO     🔍 Esecuzione check manuali per https://arkys.agency...                                                                                                                               
+  ✓ ManualCollector completato
+  ⠋ Raccolta dati GEOCollector...
+[09/14/26 16:28:02] INFO     🔍 Analisi GEO/AEO per https://arkys.agency...                                                                                                                                        
+[09/14/26 16:28:03] INFO       ✓ Analisi GEO/AEO completata                                                                                                                                                        
+  ✓ GEOCollector completato
+
+🔍 Verifica dati raccolti
+  ✓ pagespeed: True
+  ✓ gsc: True
+  ✓ ga4: True
+  ✓ html: True
+  ✓ whois: True
+  ✓ manual: True
+  ✓ geo: True
+
+🔄 Fase 2: Elaborazione dati
+  ✓ Righe Audit generate: 86
+  ✓ Righe Checklist generate: 5
+  ✓ Health Score: 90/100
+  ✓ Check PageSpeed trovati: 4
+    - U-01: Core Web Vitals (Mobile) - FAIL
+    - U-02: Lighthouse Performance Score - OK
+    - U-03: Viewport (Responsive) - OK
+    - U-04: AMP (Accelerated Mobile Pages) - INFO
+
+📊 Fase 3: Generazione report
+
+✅ Completato!
+📁 Report salvato in: reports/AuditSEO_arkys.agency_20260914_162803.xlsx
+
+  📊 Statistiche Cache PageSpeed  
+┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ Metrica               ┃ Valore ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ Cache Hits            │ 30     │
+│ Cache Misses          │ 2      │
+│ API Calls Risparmiate │ 30     │
+└───────────────────────┴────────┘
