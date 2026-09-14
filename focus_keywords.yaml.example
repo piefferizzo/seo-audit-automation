@@ -1,0 +1,27 @@
+cat > focus_keywords.yaml.example << 'EOF'
+# Esempio di focus_keywords.yaml
+# Copia questo file in focus_keywords.yaml e compila con le tue keyword.
+
+keywords:
+  "/":
+    primary: "keyword principale homepage"
+    secondary:
+      - "keyword secondaria 1"
+      - "keyword secondaria 2"
+
+  "/pagina/":
+    primary: "keyword della pagina"
+    secondary: []
+
+options:
+  missing_keyword_behavior: "warn"
+  min_density: 0.8
+  ideal_density: 1.5
+  max_density: 3.5
+  check_title: true
+  check_h1: true
+EOF
+
+git add focus_keywords.yaml.example
+git commit -m "docs: add focus_keywords.yaml.example"
+git push
