@@ -51,16 +51,23 @@ def make_audit_row(
     url: str = "",
     note: str = "",
 ) -> Dict[str, Any]:
-    return {
-        "ID Audit": audit_id,
-        "Categoria": categoria,
-        "Elemento Analizzato": elemento,
-        "Stato": stato,
-        "Severità": severita,
-        "Risultato / Evidenza": risultato,
-        "URL / Link Evidenza": url,
-        "Note Tecniche": note,
-    }
+    """Costruisce una riga di audit nel formato dict a 8 chiavi.
+
+    v2.4.0 — wrapper di Finding: la logica di validazione e costruzione
+    è centralizzata in `processors.models.finding`. Questo dict rimane
+    l'interfaccia usata dal resto del processor e dal generator Excel.
+    """
+    from processors.models.finding import make_finding
+    return make_finding(
+        audit_id=audit_id,
+        categoria=categoria,
+        elemento=elemento,
+        stato=stato,
+        severita=severita,
+        risultato=risultato,
+        url=url,
+        note=note,
+    ).to_audit_dict()
 
 
 # ---------------------------------------------------------------------------
