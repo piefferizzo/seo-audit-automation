@@ -271,271 +271,20 @@ class AuditProcessor:
     # PAGESPEED
     # ------------------------------------------------------------------
     def _process_pagespeed(self, data: Dict, domain: str) -> List[Dict]:
-        rows = []
-        mobile = data.get("mobile", {})
-        thresholds = self.config["thresholds"]
-
-        if not mobile:
-            return rows
-
-        lcp = mobile.get("lcp", 0)
-        fcp = mobile.get("fcp", 0)
-        cls = mobile.get("cls", 0)
-
-        stato, sev = classify_threshold(lcp, thresholds["lcp_critical"], thresholds["lcp_warning"])
-        rows.append(make_audit_row(
-            "U-01", "Usability", "Core Web Vitals (Mobile)", stato, sev,
-            f"FCP {fcp:.1f}s, LCP {lcp:.1f}s, CLS {cls:.2f}",
-            f"https://pagespeed.web.dev/analysis?url={domain}",
-            "Ridurre JS/CSS inutilizzati" if stato == "FAIL" else "",
-        ))
-
-        perf_score = mobile.get("performance_score", 0)
-        acc_score = mobile.get("accessibility_score", 0)
-        stato, sev = classify_threshold(
-            perf_score, thresholds["lighthouse_perf_critical"], thresholds["lighthouse_perf_warning"],
-            higher_is_worse=False,
-        )
-        rows.append(make_audit_row(
-            "U-02", "Usability", "Lighthouse Performance Score", stato, sev,
-            f"Performance {perf_score:.0f}/100, Accessibility {acc_score:.0f}/100",
-            note="Ottimizzazione necessaria" if stato != "OK" else "",
-        ))
-        return rows
+        """Delega a PageSpeedRules (v2.4.0)."""
+        from processors.rules.pagespeed_rules import PageSpeedRules
+        rule = PageSpeedRules(self.config)
+        return rule.evaluate({"pagespeed": data}, domain)
 
     # ------------------------------------------------------------------
     # GSC
     # ------------------------------------------------------------------
     def _process_gsc(self, data: Dict, domain: str) -> List[Dict]:
-        rows = []
-
-        verification = data.get("verification", "unknown")
-        if verification in ["siteOwner", "siteFullUser", "restricted"]:
-            stato, sev = "OK", 0
-        else:
-            stato, sev = "WARN", 2
-
-        rows.append(make_audit_row(
-            "GSC-01", "Technical", "Accesso Google Search Console", stato, sev,
-            f"Permesso: {verification}",
-            "https://search.google.com/search-console",
-        ))
-
-        performance = data.get("performance", [])
-        if performance:
-            total_clicks = sum(p.get("clicks", 0) for p in performance)
-            total_impressions = sum(p.get("impressions", 0) for p in performance)
-
-            if total_impressions > 0:
-                avg_position = sum(p.get("position", 0) * p.get("impressions", 0) for p in performance) / total_impressions
-            else:
-                avg_position = 0
-
-            stato, sev = ("OK", 0) if total_clicks > 0 else ("WARN", 2)
-
-            rows.append(make_audit_row(
-                "GSC-02", "General", "Performance Search Console (28 giorni)", stato, sev,
-                f"Click: {total_clicks}, Impression: {total_impressions}, Posizione media: {avg_position:.1f}",
-                "https://search.google.com/search-console/performance",
-                f"Pagine analizzate: {len(performance)}",
-            ))
-        else:
-            rows.append(make_audit_row(
-                "GSC-02", "General", "Performance Search Console (28 giorni)", "WARN", 2,
-                "Nessun dato di performance disponibile",
-                "https://search.google.com/search-console/performance",
-                "Il sito potrebbe non avere traffico organico",
-            ))
-
-        top_pages = data.get("top_pages", [])
-        if top_pages:
-            top_3_pages = top_pages[:3]
-            parts = []
-            for i, page in enumerate(top_3_pages, 1):
-                page_path = page.get('page', '').replace(domain, '') or '/'
-                clicks = page.get('clicks', 0)
-                parts.append(f"#{i}{page_path}: {clicks} clic")
-            rows.append(make_audit_row(
-                "GSC-05", "General", "Top Pagine per Click", "OK", 0,
-                ", ".join(parts),
-                "https://search.google.com/search-console/performance",
-            ))
-
-        top_queries = data.get("top_queries", [])
-        if top_queries:
-            top_3_queries = top_queries[:3]
-            parts = []
-            for i, query in enumerate(top_3_queries, 1):
-                query_text = query.get('query', '')
-                clicks = query.get('clicks', 0)
-                parts.append(f"#{i} '{query_text}': {clicks} clic")
-            rows.append(make_audit_row(
-                "GSC-06", "General", "Top Keyword per Click", "OK", 0,
-                ", ".join(parts),
-                "https://search.google.com/search-console/performance",
-            ))
-
-        position_dist = data.get("position_distribution", {})
-        if position_dist and position_dist.get('distribution'):
-            dist = position_dist['distribution']
-            total = position_dist.get('total_queries', 0)
-
-            top_3_count = dist.get('top_3', {}).get('count', 0)
-            page_1_count = dist.get('page_1', {}).get('count', 0)
-            page_2_count = dist.get('page_2', {}).get('count', 0)
-
-            top_3_pct = (top_3_count / total * 100) if total > 0 else 0
-            risultato = f"Top 3: {top_3_count} keyword ({top_3_pct:.1f}%), Pagina 1: {page_1_count}, Pagina 2: {page_2_count} su {total} totali"
-
-            if total > 0 and top_3_pct > 20:
-                stato, sev = "OK", 0
-            else:
-                stato, sev = "WARN", 2
-
-            rows.append(make_audit_row(
-                "GSC-07", "General", "Distribuzione Posizioni", stato, sev, risultato,
-                "https://search.google.com/search-console/performance",
-                "Migliorare posizionamento keyword in pagina 2" if stato == "WARN" else "",
-            ))
-
-        trending = data.get("trending_queries", {})
-        if trending:
-            growing = trending.get('growing', [])
-            declining = trending.get('declining', [])
-            new_queries = trending.get('new', [])
-
-            if growing or declining or new_queries:
-                parts = []
-                if growing:
-                    parts.append(f"{len(growing)} keyword in crescita")
-                if declining:
-                    parts.append(f"{len(declining)} keyword in calo")
-                if new_queries:
-                    parts.append(f"{len(new_queries)} keyword nuove")
-
-                risultato = ", ".join(parts)
-                stato, sev = ("OK", 0) if len(growing) >= len(declining) else ("WARN", 2)
-
-                rows.append(make_audit_row(
-                    "GSC-08", "General", "Trend Keyword (vs periodo precedente)", stato, sev, risultato,
-                    "https://search.google.com/search-console/performance",
-                    "Investigare keyword in calo" if len(declining) > 0 else "",
-                ))
-
-        devices = data.get("devices", {})
-        if devices:
-            desktop_data = devices.get('DESKTOP', {})
-            mobile_data = devices.get('MOBILE', {})
-            desktop_clicks = desktop_data.get('clicks', 0)
-            mobile_clicks = mobile_data.get('clicks', 0)
-            total_clicks = desktop_clicks + mobile_clicks
-
-            if total_clicks > 0:
-                mobile_pct = (mobile_clicks / total_clicks) * 100
-                desktop_pct = (desktop_clicks / total_clicks) * 100
-                risultato = f"Desktop: {desktop_clicks} clic ({desktop_pct:.1f}%), Mobile: {mobile_clicks} clic ({mobile_pct:.1f}%)"
-                stato, sev = ("OK", 0) if mobile_pct > 50 else ("WARN", 2)
-
-                rows.append(make_audit_row(
-                    "GSC-09", "Usability", "Distribuzione Traffico per Dispositivo", stato, sev, risultato,
-                    "https://search.google.com/search-console/performance",
-                    "Ottimizzare esperienza mobile" if mobile_pct < 50 else "",
-                ))
-
-        # GSC-03
-        sitemaps_info = data.get("sitemaps", {})
-        if sitemaps_info and sitemaps_info.get('found'):
-            sitemap_count = sitemaps_info.get('count', 0)
-            total_urls = sitemaps_info.get('total_urls', 0)
-
-            inspection = data.get("indexed_estimate", {})
-            if inspection.get('estimation_method') == 'url_inspection_full':
-                indexed = inspection.get('indexed', 0)
-                inspected = inspection.get('total_inspected', 0)
-                index_rate = inspection.get('index_rate', 0)
-                risultato = (
-                    f"{sitemap_count} sitemap, {total_urls} URL inviate, "
-                    f"{indexed}/{inspected} URL ispezionate risultano indicizzate ({index_rate:.1f}%)"
-                )
-                if inspected > 0 and index_rate < 50:
-                    stato, sev = "WARN", 2
-                    note = f"Ispezionate {inspected} URL via URL Inspection API. Tasso di indicizzazione basso."
-                else:
-                    stato, sev, note = "OK", 0, ""
-            elif sitemaps_info.get('indexed_available'):
-                total_indexed = sitemaps_info.get('total_indexed', 0)
-                index_rate = (total_indexed / total_urls * 100) if total_urls > 0 else 0
-                risultato = f"{sitemap_count} sitemap, {total_urls} URL inviate, {total_indexed} URL sitemap indicizzate ({index_rate:.1f}%)"
-                if total_indexed == 0 and total_urls > 0:
-                    stato, sev, note = "FAIL", 1, "Nessuna URL della sitemap indicizzata."
-                elif index_rate < 50:
-                    stato, sev, note = "WARN", 2, "Tasso di indicizzazione basso."
-                else:
-                    stato, sev, note = "OK", 0, ""
-            else:
-                risultato = f"{sitemap_count} sitemap, {total_urls} URL inviate (conteggio indicizzate non disponibile)"
-                stato, sev = "INFO", 0
-                note = (
-                    "Il campo 'indexed' dell'API GSC è deprecato e la URL Inspection API "
-                    "non è accessibile. Verificare su GSC → Indicizzazione → Pagine."
-                )
-
-            rows.append(make_audit_row(
-                "GSC-03", "Technical", "Sitemap in GSC", stato, sev, risultato,
-                "https://search.google.com/search-console/sitemaps", note,
-            ))
-
-        # GSC-04
-        indexed_estimate = data.get("indexed_estimate", {})
-        if indexed_estimate and indexed_estimate.get('estimation_method') == 'url_inspection_full':
-            indexed = indexed_estimate.get('indexed', 0)
-            not_indexed = indexed_estimate.get('not_indexed', 0)
-            inspected = indexed_estimate.get('total_inspected', 0)
-            errors = indexed_estimate.get('errors', 0)
-            index_rate = indexed_estimate.get('index_rate', 0)
-
-            breakdown = indexed_estimate.get('coverage_breakdown', {}) or {}
-            top_states = sorted(breakdown.items(), key=lambda kv: kv[1], reverse=True)[:3]
-            states_str = "; ".join(f"{k}: {v}" for k, v in top_states)
-
-            risultato = (
-                f"{indexed}/{inspected} indicizzate ({index_rate:.1f}%), "
-                f"{not_indexed} non indicizzate, {errors} errori"
-            )
-            note = f"Top coverage states: {states_str}" if states_str else ""
-
-            if inspected > 0 and index_rate >= 70:
-                stato, sev = "OK", 0
-            elif inspected > 0 and index_rate >= 40:
-                stato, sev = "WARN", 2
-            else:
-                stato, sev = "FAIL", 1
-
-            rows.append(make_audit_row(
-                "GSC-04", "Technical", "Indice reale (URL Inspection API)",
-                stato, sev, risultato,
-                "https://search.google.com/search-console/index/coverage",
-                note,
-            ))
-        elif indexed_estimate and indexed_estimate.get('sample_size', 0) > 0:
-            sample_size = indexed_estimate.get('sample_size', 0)
-            indexed = indexed_estimate.get('indexed', 0)
-            method = indexed_estimate.get('estimation_method', 'unknown')
-            note_base = indexed_estimate.get('note', '')
-
-            if method == 'performance_api':
-                risultato = f"~{indexed} pagine con impression negli ultimi 28 giorni (campione: {sample_size} URL)"
-            else:
-                risultato = "Stima non disponibile"
-
-            rows.append(make_audit_row(
-                "GSC-04", "Technical", "Pagine con Impression (28 giorni)",
-                "OK", 0, risultato,
-                "https://search.google.com/search-console/index/coverage", note_base,
-            ))
-
-        return rows
-
+        """Delega a GSCRules (v2.4.0)."""
+        from processors.rules.gsc_rules import GSCRules
+        rule = GSCRules(self.config)
+        return rule.evaluate({"gsc": data}, domain)
+    
     # ------------------------------------------------------------------
     # GA4 base
     # ------------------------------------------------------------------
@@ -796,112 +545,18 @@ class AuditProcessor:
             "" if has_sitemap_ref else "Aggiungere riferimento alla sitemap",
         ))
 
-        title = homepage.get('title', '')
-        title_len = len(title)
+        # H-01..H-04 → HtmlMetaRules (v2.4.0)
+        from processors.rules.html_meta_rules import HtmlMetaRules
+        meta_rule = HtmlMetaRules(self.config)
+        rows.extend(meta_rule.evaluate({"html": data}, domain))
 
-        if not title:
-            stato, sev, risultato, note = "FAIL", 1, "Mancante", "Ottimizzare con keyword target"
-        elif title_len < 30:
-            stato, sev = "WARN", 2
-            risultato = f"Presente ma troppo corto ({title_len} caratteri, ottimale: 50-60)"
-            note = "Allungare il title a 50-60 caratteri"
-        elif title_len > 60:
-            stato, sev = "WARN", 2
-            risultato = f"Presente ma troppo lungo ({title_len} caratteri, ottimale: 50-60)"
-            note = "Accorciare il title a 50-60 caratteri"
-        else:
-            stato, sev, note = "OK", 0, ""
-            risultato = f"Presente ({title_len} caratteri)"
+        # H-05..H-08 → HTMLStructureRules (v2.4.0)
+        from processors.rules.html_structure_rules import HTMLStructureRules
+        structure_rule = HTMLStructureRules(self.config)
+        rows.extend(structure_rule.evaluate({"html": data}, domain))
 
-        rows.append(make_audit_row("H-01", "HTML", "Meta Title", stato, sev, risultato, homepage.get('url', ''), note))
-
-        description = homepage.get('meta_description', '')
-        desc_len = len(description)
-
-        if not description:
-            stato, sev, risultato, note = "FAIL", 1, "Mancante", "Ottimizzare con keyword target"
-        elif desc_len < 120:
-            stato, sev = "WARN", 2
-            risultato = f"Presente ma troppo corta ({desc_len} caratteri, ottimale: 120-160)"
-            note = "Allungare la description a 120-160 caratteri"
-        elif desc_len > 160:
-            stato, sev = "WARN", 2
-            risultato = f"Presente ma troppo lunga ({desc_len} caratteri, ottimale: 120-160)"
-            note = "Accorciare la description a 120-160 caratteri"
-        else:
-            stato, sev, note = "OK", 0, ""
-            risultato = f"Presente ({desc_len} caratteri)"
-
-        rows.append(make_audit_row("H-02", "HTML", "Meta Description", stato, sev, risultato, homepage.get('url', ''), note))
-
-        canonical = homepage.get('canonical', '')
-        rows.append(make_audit_row(
-            "H-03", "HTML", "Canonical",
-            "OK" if canonical else "FAIL", 0 if canonical else 1,
-            "Presente" if canonical else "Mancante", homepage.get('url', ''),
-        ))
-
-        headings = homepage.get('headings', {})
-        h1_count = len(headings.get('h1', []))
-        rows.append(make_audit_row(
-            "H-04", "HTML", "Heading H1",
-            "OK" if h1_count == 1 else "FAIL", 0 if h1_count == 1 else 1,
-            f"{h1_count} H1 presente" if h1_count > 0 else "Nessun H1",
-            homepage.get('url', ''),
-            "Ottimizzare con keyword target" if h1_count != 1 else "",
-        ))
-
-        images = homepage.get('images', [])
-        total_images = len(images)
-        images_without_alt = len([img for img in images if not img.get('alt')])
-        alt_percentage = (images_without_alt / total_images * 100) if total_images > 0 else 0
-
-        if total_images == 0:
-            stato, sev, risultato, note = "OK", 0, "Nessuna immagine sulla homepage", ""
-        elif alt_percentage == 0:
-            stato, sev, risultato, note = "OK", 0, f"Tutte le {total_images} immagini hanno alt text", ""
-        elif alt_percentage < 10:
-            stato, sev = "WARN", 2
-            risultato = f"{images_without_alt}/{total_images} immagini senza alt ({alt_percentage:.1f}%)"
-            note = "Correzione minore, ma utile per accessibilità"
-        else:
-            stato, sev = "FAIL", 1
-            risultato = f"{images_without_alt}/{total_images} immagini senza alt ({alt_percentage:.1f}%)"
-            note = "Aggiungere alt text descrittivi"
-
-        rows.append(make_audit_row("H-05", "HTML", "Images Alt Tag", stato, sev, risultato, homepage.get('url', ''), note))
-
-        structured_data = homepage.get('structured_data', [])
-        rows.append(make_audit_row(
-            "H-06", "HTML", "Structured Data (Schema.org)",
-            "OK" if structured_data else "FAIL", 0 if structured_data else 1,
-            f"{len(structured_data)} blocchi presenti" if structured_data else "Non presenti",
-            homepage.get('url', ''),
-            "Implementare markup Schema.org" if not structured_data else "",
-        ))
-
-        og_tags = homepage.get('og_tags', {})
-        rows.append(make_audit_row(
-            "H-07", "HTML", "Open Graph",
-            "OK" if og_tags else "WARN", 0 if og_tags else 2,
-            f"{len(og_tags)} tag presenti" if og_tags else "Non presenti",
-            homepage.get('url', ''),
-        ))
-
-        hreflang = homepage.get('hreflang', [])
+        # `lang` serve a H-10 (inline), quindi lo ridefiniamo qui
         lang = homepage.get('lang', '')
-        valid_hreflang = [h for h in hreflang if h.get('href')]
-
-        if len(valid_hreflang) > 0:
-            stato, sev, risultato, note = "OK", 0, f"{len(valid_hreflang)} lingue presenti", ""
-        elif not lang or lang in ['it', 'it-IT', 'en', 'en-US']:
-            stato, sev = "N/A", 0
-            risultato = f"Non necessario (sito monolingua: {lang or 'non specificato'})"
-            note = ""
-        else:
-            stato, sev, risultato, note = "WARN", 2, "Non presente", ""
-
-        rows.append(make_audit_row("H-08", "HTML", "Hreflang", stato, sev, risultato, homepage.get('url', ''), note))
 
         viewport = homepage.get('viewport', '')
         rows.append(make_audit_row(
@@ -1395,59 +1050,11 @@ class AuditProcessor:
         return rows
 
     def _process_favicon_and_images(self, data: Dict, domain: str) -> List[Dict]:
-        rows = []
-        homepage = data.get('homepage', {})
-
-        if not homepage or 'error' in homepage:
-            return rows
-
-        favicon = data.get('favicon', {})
-        if favicon:
-            has_favicon = favicon.get('has_favicon', False)
-            favicon_urls = favicon.get('favicon_urls', [])
-            types = favicon.get('types', [])
-            has_apple_touch = favicon.get('has_apple_touch', False)
-
-            if has_favicon:
-                stato, sev = "OK", 0
-                risultato = f"Favicon presente ({len(favicon_urls)} varianti: {', '.join(types) if types else 'N/A'})"
-                note = "" if has_apple_touch else "Consigliato aggiungere apple-touch-icon per dispositivi iOS"
-            else:
-                stato, sev, risultato = "FAIL", 1, "Favicon non trovata"
-                note = "Aggiungere favicon per migliorare UX e branding"
-
-            rows.append(make_audit_row("H-16", "HTML", "Favicon", stato, sev, risultato, homepage.get('url', ''), note))
-
-        images = homepage.get('images', [])
-        if images:
-            images_with_alt = sum(1 for img in images if img.get('alt', '').strip())
-            images_with_dimensions = sum(1 for img in images if img.get('width') and img.get('height'))
-            modern_formats = sum(1 for img in images if img.get('src', '').lower().endswith(('.webp', '.avif')))
-
-            total = len(images)
-            seo_friendly = sum([
-                images_with_alt == total,
-                images_with_dimensions == total,
-                modern_formats > 0
-            ])
-
-            if seo_friendly == 3:
-                stato, sev = "OK", 0
-                risultato = f"Immagini ottimizzate per indicizzazione ({total} immagini, {modern_formats} in formato moderno)"
-            elif seo_friendly >= 1:
-                stato, sev = "WARN", 2
-                risultato = f"{total} immagini: {images_with_alt} con alt, {images_with_dimensions} con dimensioni, {modern_formats} formato moderno"
-            else:
-                stato, sev = "WARN", 2
-                risultato = f"{total} immagini non ottimizzate per indicizzazione"
-
-            rows.append(make_audit_row(
-                "H-17", "HTML", "Image SEO Optimization", stato, sev, risultato, homepage.get('url', ''),
-                "Ottimizzare alt text, dimensioni e formato (WebP/AVIF)" if seo_friendly < 3 else "",
-            ))
-
-        return rows
-
+        """Delega a HTMLImageRules (v2.4.0)."""
+        from processors.rules.html_rules import HTMLImageRules
+        rule = HTMLImageRules(self.config)
+        return rule.evaluate({"html": data}, domain)
+    
     def _process_whois(self, data: Dict, domain: str) -> List[Dict]:
         rows = []
 
