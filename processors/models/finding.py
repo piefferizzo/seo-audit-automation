@@ -169,3 +169,31 @@ def make_finding(
         notes=note,
         **kwargs,
     )
+
+def make_audit_row(
+    audit_id: str,
+    categoria: str,
+    elemento: str,
+    stato: str,
+    severita: int,
+    risultato: str,
+    url: str = "",
+    note: str = "",
+) -> Dict[str, Any]:
+    """Costruisce una riga di audit nel formato dict a 8 chiavi.
+
+    Wrapper di `make_finding` che ritorna direttamente il dict classico
+    usato dal processor e dal generator Excel. Vivere qui (invece che in
+    audit_processor.py) permette alle regole in processors/rules/*.py di
+    importarlo senza creare import circolari con audit_processor.
+    """
+    return make_finding(
+        audit_id=audit_id,
+        categoria=categoria,
+        elemento=elemento,
+        stato=stato,
+        severita=severita,
+        risultato=risultato,
+        url=url,
+        note=note,
+    ).to_audit_dict()

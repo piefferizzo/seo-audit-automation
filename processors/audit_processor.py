@@ -41,34 +41,10 @@ from utils.logger import setup_logger
 # ---------------------------------------------------------------------------
 # HELPER 1 — costruzione riga di audit
 # ---------------------------------------------------------------------------
-def make_audit_row(
-    audit_id: str,
-    categoria: str,
-    elemento: str,
-    stato: str,
-    severita: int,
-    risultato: str,
-    url: str = "",
-    note: str = "",
-) -> Dict[str, Any]:
-    """Costruisce una riga di audit nel formato dict a 8 chiavi.
-
-    v2.4.0 — wrapper di Finding: la logica di validazione e costruzione
-    è centralizzata in `processors.models.finding`. Questo dict rimane
-    l'interfaccia usata dal resto del processor e dal generator Excel.
-    """
-    from processors.models.finding import make_finding
-    return make_finding(
-        audit_id=audit_id,
-        categoria=categoria,
-        elemento=elemento,
-        stato=stato,
-        severita=severita,
-        risultato=risultato,
-        url=url,
-        note=note,
-    ).to_audit_dict()
-
+# make_audit_row è ora definita in processors.models.finding.
+# Viene re-esportata qui per retrocompatibilità con il resto del file
+# e con eventuali import esterni.
+from processors.models.finding import make_audit_row  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # HELPER 2 — classificazione a soglie
